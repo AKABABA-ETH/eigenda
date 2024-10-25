@@ -59,13 +59,19 @@ func RunDisperserServer(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
+
+	if config.DisperserVersion == V2 {
+		server := apiserver.NewDispersalServerV2(config.ServerConfig, logger)
+		return server.Start(context.Background())
+	}
+
 	client, err := geth.NewMultiHomingClient(config.EthClientConfig, gethcommon.Address{}, logger)
 	if err != nil {
 		logger.Error("Cannot create chain.Client", "err", err)
 		return err
 	}
 
-	transactor, err := eth.NewTransactor(logger, client, config.BLSOperatorStateRetrieverAddr, config.EigenDAServiceManagerAddr)
+	transactor, err := eth.NewReader(logger, client, config.BLSOperatorStateRetrieverAddr, config.EigenDAServiceManagerAddr)
 	if err != nil {
 		return err
 	}
@@ -90,7 +96,7 @@ func RunDisperserServer(ctx *cli.Context) error {
 
 	bucketName := config.BlobstoreConfig.BucketName
 	logger.Info("Creating blob store", "bucket", bucketName)
-	blobMetadataStore := blobstore.NewBlobMetadataStore(dynamoClient, logger, config.BlobstoreConfig.TableName, config.BlobstoreConfig.ShadowTableName, time.Duration((storeDurationBlocks+blockStaleMeasure)*12)*time.Second)
+	blobMetadataStore := blobstore.NewBlobMetadataStore(dynamoClient, logger, config.BlobstoreConfig.TableName, time.Duration((storeDurationBlocks+blockStaleMeasure)*12)*time.Second)
 	blobStore := blobstore.NewSharedStorage(bucketName, s3Client, blobMetadataStore, logger)
 
 	reg := prometheus.NewRegistry()

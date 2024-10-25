@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+
 	"github.com/Layr-Labs/eigenda/api/clients"
 	disperser_rpc "github.com/Layr-Labs/eigenda/api/grpc/disperser"
 	"github.com/Layr-Labs/eigenda/disperser"
@@ -20,11 +21,19 @@ func (m *MockDisperserClient) DisperseBlob(
 	customQuorums []uint8) (*disperser.BlobStatus, []byte, error) {
 
 	args := m.mock.Called(data, customQuorums)
-
 	return args.Get(0).(*disperser.BlobStatus), args.Get(1).([]byte), args.Error(2)
 }
 
 func (m *MockDisperserClient) DisperseBlobAuthenticated(
+	ctx context.Context,
+	data []byte,
+	customQuorums []uint8) (*disperser.BlobStatus, []byte, error) {
+
+	args := m.mock.Called(data, customQuorums)
+	return args.Get(0).(*disperser.BlobStatus), args.Get(1).([]byte), args.Error(2)
+}
+
+func (m *MockDisperserClient) DispersePaidBlob(
 	ctx context.Context,
 	data []byte,
 	customQuorums []uint8) (*disperser.BlobStatus, []byte, error) {
@@ -41,4 +50,9 @@ func (m *MockDisperserClient) GetBlobStatus(ctx context.Context, key []byte) (*d
 func (m *MockDisperserClient) RetrieveBlob(ctx context.Context, batchHeaderHash []byte, blobIndex uint32) ([]byte, error) {
 	args := m.mock.Called(batchHeaderHash, blobIndex)
 	return args.Get(0).([]byte), args.Error(1)
+}
+
+func (m *MockDisperserClient) Close() error {
+	args := m.mock.Called()
+	return args.Error(0)
 }

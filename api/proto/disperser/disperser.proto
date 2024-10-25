@@ -5,11 +5,23 @@ option go_package = "github.com/Layr-Labs/eigenda/api/grpc/disperser";
 
 // Disperser defines the public APIs for dispersing blobs.
 service Disperser {
-	// This API accepts blob to disperse from clients.
+	// DisperseBlob accepts a single blob to be dispersed.
+	// This executes the dispersal async, i.e. it returns once the request
+	// is accepted. The client should use GetBlobStatus() API to poll the
+	// processing status of the blob.
+	// 
+	// If DisperseBlob returns the following error codes:
+	// INVALID_ARGUMENT (400): request is invalid for a reason specified in the error msg.
+	// RESOURCE_EXHAUSTED (429): request is rate limited for the quorum specified in the error msg.
+	//                           user should retry after the specified duration.
+	// INTERNAL (500): serious error, user should NOT retry.
+	rpc DisperseBlob(DisperseBlobRequest) returns (DisperseBlobReply) {}
+
+	// This API require valid payments to accept blob to disperse from clients.
 	// This executes the dispersal async, i.e. it returns once the request
 	// is accepted. The client could use GetBlobStatus() API to poll the the
 	// processing status of the blob.
-	rpc DisperseBlob(DisperseBlobRequest) returns (DisperseBlobReply) {}
+	rpc DispersePaidBlob(DispersePaidBlobRequest) returns (DisperseBlobReply) {}
 
 
 	// DisperseBlobAuthenticated is similar to DisperseBlob, except that it requires the
@@ -32,13 +44,6 @@ service Disperser {
 	// The blob should have been initially dispersed via this Disperser service
 	// for this API to work.
 	rpc RetrieveBlob(RetrieveBlobRequest) returns (RetrieveBlobReply) {}
-
-	//////////////////////////////////////////////////////////////////////////////
-	// Experimental: the following RPCs are experimental and subject to change. //
-	//////////////////////////////////////////////////////////////////////////////
-
-	// Retrieves the requested chunk from the Disperser's backend.
-	rpc GetChunk(GetChunkRequest) returns (GetChunkReply) {}
 }
 
 // Requests and Responses
@@ -78,12 +83,11 @@ message AuthenticationData {
 
 message DisperseBlobRequest {
 	// The data to be dispersed.
-	// The size of data must be <= 2MiB. Every 32 bytes of data chunk is interpreted as an integer in big endian format
+	// The size of data must be <= 16MiB. Every 32 bytes of data is interpreted as an integer in big endian format
 	// where the lower address has more significant bits. The integer must stay in the valid range to be interpreted
-	// as a field element on the bn254 curve. The valid range is 
+	// as a field element on the bn254 curve. The valid range is
 	// 0 <= x < 21888242871839275222246405745257275088548364400416034343698204186575808495617
-	// containing slightly less than 254 bits and more than 253 bits. If any one of the 32 bytes chunk is outside the range, 
-	// the whole request is deemed as invalid, and rejected. 
+	// If any one of the 32 bytes elements is outside the range, the whole request is deemed as invalid, and rejected.
 	bytes data = 1;
 	// The quorums to which the blob will be sent, in addition to the required quorums which are configured
 	// on the EigenDA smart contract. If required quorums are included here, an error will be returned.
@@ -94,6 +98,30 @@ message DisperseBlobRequest {
 	// The account ID of the client. This should be a hex-encoded string of the ECSDA public key
 	// corresponding to the key used by the client to sign the BlobAuthHeader.
 	string account_id = 3;
+}
+
+message DispersePaidBlobRequest {
+	// The data to be dispersed.
+	// The size of data must be <= 2MiB. Every 32 bytes of data chunk is interpreted as an integer in big endian format
+	// where the lower address has more significant bits. The integer must stay in the valid range to be interpreted
+	// as a field element on the bn254 curve. The valid range is 
+	// 0 <= x < 21888242871839275222246405745257275088548364400416034343698204186575808495617
+	// containing slightly less than 254 bits and more than 253 bits. If any one of the 32 bytes chunk is outside the range, 
+	// the whole request is deemed as invalid, and rejected. 
+	// NOTE: I want to include dataLength here, not the data itself.
+	bytes data = 1;
+	// The quorums to which the blob will be sent, in addition to the required quorums which are configured
+	// on the EigenDA smart contract. If required quorums are included here, an error will be returned.
+	// The disperser will ensure that the encoded blobs for each quorum are all processed
+	// within the same batch. The request doesn't need to include the payment split because the information is registered on-chain.
+	// In theory the quorum numbers should be the same as the ones in the DisperseBlobRequest, but I'm allowing freedom 
+	// for individual requests.
+	repeated uint32 custom_quorum_numbers = 2;
+	
+	// Payment header contains AccountID, BinIndex, and CumulativePayment
+	common.PaymentHeader payment_header = 3;
+	// signature of payment_header
+	bytes payment_signature = 4;
 }
 
 message DisperseBlobReply {
@@ -256,22 +284,4 @@ message BatchHeader {
 	// The Disperser will encode and disperse the blobs based on the onchain info
 	// (e.g. operator stakes) at this block number.
 	uint32 reference_block_number = 4;
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
-// Experimental: the following definitions are experimental and subject to change. //
-/////////////////////////////////////////////////////////////////////////////////////
-
-// Request a specific chunk
-message GetChunkRequest {
-	// The hash of the blob's header.
-	bytes blob_header_hash = 1;
-	// The index of the chunk within the blob.
-	uint32 chunk_index = 2;
-}
-
-// Reply to GetChunkRequest
-message GetChunkReply {
-	// The chunk requested.
-	common.ChunkData chunk = 1;
 }

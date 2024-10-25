@@ -41,15 +41,15 @@ import (
 )
 
 var (
-	queue           disperser.BlobStore
-	dispersalServer *apiserver.DispersalServer
+	queue             disperser.BlobStore
+	dispersalServer   *apiserver.DispersalServer
+	dispersalServerV2 *apiserver.DispersalServerV2
 
-	dockertestPool          *dockertest.Pool
-	dockertestResource      *dockertest.Resource
-	UUID                    = uuid.New()
-	metadataTableName       = fmt.Sprintf("test-BlobMetadata-%v", UUID)
-	shadowMetadataTableName = fmt.Sprintf("test-BlobMetadata-Shadow-%v", UUID)
-	bucketTableName         = fmt.Sprintf("test-BucketStore-%v", UUID)
+	dockertestPool     *dockertest.Pool
+	dockertestResource *dockertest.Resource
+	UUID               = uuid.New()
+	metadataTableName  = fmt.Sprintf("test-BlobMetadata-%v", UUID)
+	bucketTableName    = fmt.Sprintf("test-BucketStore-%v", UUID)
 
 	deployLocalStack bool
 	localStackPort   = "4568"
@@ -127,7 +127,7 @@ func TestDisperseBlobAuthTimeout(t *testing.T) {
 
 func TestDisperseBlobWithRequiredQuorums(t *testing.T) {
 
-	transactor := &mock.MockTransactor{}
+	transactor := &mock.MockWriter{}
 	transactor.On("GetCurrentBlockNumber").Return(uint32(100), nil)
 	transactor.On("GetQuorumCount").Return(uint8(2), nil)
 	quorumParams := []core.SecurityParam{
@@ -588,13 +588,13 @@ func setup() {
 
 	}
 
-	err = deploy.DeployResources(dockertestPool, localStackPort, metadataTableName, shadowMetadataTableName, bucketTableName)
+	err = deploy.DeployResources(dockertestPool, localStackPort, metadataTableName, bucketTableName)
 	if err != nil {
 		teardown()
 		panic("failed to deploy AWS resources")
 	}
 
-	transactor := &mock.MockTransactor{}
+	transactor := &mock.MockWriter{}
 	transactor.On("GetCurrentBlockNumber").Return(uint32(100), nil)
 	transactor.On("GetQuorumCount").Return(uint8(2), nil)
 	quorumParams := []core.SecurityParam{
@@ -605,6 +605,7 @@ func setup() {
 	transactor.On("GetRequiredQuorumNumbers", tmock.Anything).Return([]uint8{}, nil)
 
 	dispersalServer = newTestServer(transactor)
+	dispersalServerV2 = newTestServerV2()
 }
 
 func teardown() {
@@ -616,7 +617,7 @@ func teardown() {
 	}
 }
 
-func newTestServer(transactor core.Transactor) *apiserver.DispersalServer {
+func newTestServer(transactor core.Writer) *apiserver.DispersalServer {
 	logger := logging.NewNoopLogger()
 
 	bucketName := "test-eigenda-blobstore"
@@ -634,7 +635,7 @@ func newTestServer(transactor core.Transactor) *apiserver.DispersalServer {
 	if err != nil {
 		panic("failed to create dynamoDB client")
 	}
-	blobMetadataStore := blobstore.NewBlobMetadataStore(dynamoClient, logger, metadataTableName, shadowMetadataTableName, time.Hour)
+	blobMetadataStore := blobstore.NewBlobMetadataStore(dynamoClient, logger, metadataTableName, time.Hour)
 
 	globalParams := common.GlobalRateParams{
 		CountFailed: false,

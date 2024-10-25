@@ -43,6 +43,7 @@ import (
 	"github.com/Layr-Labs/eigenda/disperser/common/inmem"
 	"github.com/Layr-Labs/eigenda/encoding"
 	"github.com/Layr-Labs/eigenda/node"
+	"github.com/Layr-Labs/eigenda/node/grpc"
 	nodegrpc "github.com/Layr-Labs/eigenda/node/grpc"
 
 	nodepb "github.com/Layr-Labs/eigenda/api/grpc/node"
@@ -125,7 +126,7 @@ type TestDisperser struct {
 	batcher       *batcher.Batcher
 	server        *apiserver.DispersalServer
 	encoderServer *encoder.Server
-	transactor    *coremock.MockTransactor
+	transactor    *coremock.MockWriter
 	txnManager    *batchermock.MockTxnManager
 }
 
@@ -136,7 +137,7 @@ func mustMakeDisperser(t *testing.T, cst core.IndexedChainState, store disperser
 	batcherMetrics := batcher.NewMetrics("9100", logger)
 	dispatcher := dispatcher.NewDispatcher(dispatcherConfig, logger, batcherMetrics.DispatcherMetrics)
 
-	transactor := &coremock.MockTransactor{}
+	transactor := &coremock.MockWriter{}
 	transactor.On("OperatorIDToAddress").Return(gethcommon.Address{}, nil)
 	agg, err := core.NewStdSignatureAggregator(logger, transactor)
 	assert.NoError(t, err)
@@ -191,7 +192,7 @@ func mustMakeDisperser(t *testing.T, cst core.IndexedChainState, store disperser
 	serverConfig := disperser.ServerConfig{
 		GrpcPort: fmt.Sprint(disperserGrpcPort),
 	}
-	tx := &coremock.MockTransactor{}
+	tx := &coremock.MockWriter{}
 	tx.On("GetCurrentBlockNumber").Return(uint64(100), nil)
 	tx.On("GetQuorumCount").Return(1, nil)
 	server := apiserver.NewDispersalServer(serverConfig, store, tx, logger, disperserMetrics, ratelimiter, rateConfig, testMaxBlobSize)
@@ -206,8 +207,9 @@ func mustMakeDisperser(t *testing.T, cst core.IndexedChainState, store disperser
 }
 
 type TestOperator struct {
-	Node   *node.Node
-	Server *nodegrpc.Server
+	Node     *node.Node
+	ServerV1 *nodegrpc.Server
+	ServerV2 *nodegrpc.ServerV2
 }
 
 func mustMakeOperators(t *testing.T, cst *coremock.ChainDataMock, logger logging.Logger) map[core.OperatorID]TestOperator {
@@ -268,7 +270,7 @@ func mustMakeOperators(t *testing.T, cst *coremock.ChainDataMock, logger logging
 		_, v0 := mustMakeTestComponents()
 		val := core.NewShardValidator(v0, asn, cst, id)
 
-		tx := &coremock.MockTransactor{}
+		tx := &coremock.MockWriter{}
 		tx.On("RegisterBLSPublicKey").Return(nil)
 		tx.On("RegisterOperator").Return(nil)
 		tx.On("GetRegisteredQuorumIdsForOperator").Return(registeredQuorums, nil)
@@ -315,11 +317,13 @@ func mustMakeOperators(t *testing.T, cst *coremock.ChainDataMock, logger logging
 
 		ratelimiter := &commonmock.NoopRatelimiter{}
 
-		s := nodegrpc.NewServer(config, n, logger, ratelimiter)
+		serverV1 := nodegrpc.NewServer(config, n, logger, ratelimiter)
+		serverV2 := nodegrpc.NewServerV2(config, n, logger, ratelimiter)
 
 		ops[id] = TestOperator{
-			Node:   n,
-			Server: s,
+			Node:     n,
+			ServerV1: serverV1,
+			ServerV2: serverV2,
 		}
 	}
 
@@ -389,7 +393,8 @@ func TestDispersalAndRetrieval(t *testing.T) {
 		assert.NoError(t, err)
 
 		fmt.Println("Starting server")
-		go op.Server.Start()
+		err = grpc.RunServers(op.ServerV1, op.ServerV2, op.Node.Config, logger)
+		assert.NoError(t, err)
 	}
 
 	blob := mustMakeTestBlob()
@@ -513,7 +518,7 @@ func TestDispersalAndRetrieval(t *testing.T) {
 		fmt.Println("Processing operator: ", hexutil.Encode(op.Node.Config.ID[:]))
 
 		// check that blob headers can be retrieved from operators
-		headerReply, err := op.Server.GetBlobHeader(ctx, &nodepb.GetBlobHeaderRequest{
+		headerReply, err := op.ServerV1.GetBlobHeader(ctx, &nodepb.GetBlobHeaderRequest{
 			BatchHeaderHash: batchHeaderHash,
 			BlobIndex:       metadata.ConfirmationInfo.BlobIndex,
 			QuorumId:        uint32(0),
@@ -549,7 +554,7 @@ func TestDispersalAndRetrieval(t *testing.T) {
 		}
 
 		// check that chunks can be retrieved from operators
-		chunksReply, err := op.Server.RetrieveChunks(ctx, &nodepb.RetrieveChunksRequest{
+		chunksReply, err := op.ServerV1.RetrieveChunks(ctx, &nodepb.RetrieveChunksRequest{
 			BatchHeaderHash: batchHeaderHash,
 			BlobIndex:       metadata.ConfirmationInfo.BlobIndex,
 			QuorumId:        uint32(0),

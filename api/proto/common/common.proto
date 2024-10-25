@@ -9,6 +9,32 @@ message G1Commitment {
 	bytes y = 2;
 }
 
+message G2Commitment {
+	// The A0 element of the X coordinate of G2 point.
+	bytes x_a0 = 1;
+	// The A1 element of the X coordinate of G2 point.
+	bytes x_a1 = 2;
+	// The A0 element of the Y coordinate of G2 point.
+	bytes y_a0 = 3;
+	// The A1 element of the Y coordinate of G2 point.
+	bytes y_a1 = 4;
+}
+
+// BlobCommitment represents commitment of a specific blob, containing its
+// KZG commitment, degree proof, the actual degree, and data length in number of symbols.
+message BlobCommitment {
+	G1Commitment commitment = 1;
+	G2Commitment length_commitment = 2;
+	G2Commitment length_proof = 3;
+	uint32 data_length = 4;
+}
+
+message PaymentHeader {
+  string account_id = 1;
+  uint32 bin_index = 2;
+  bytes cumulative_payment = 3;
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // Experimental: the following definitions are experimental and subject to change. //
 /////////////////////////////////////////////////////////////////////////////////////
