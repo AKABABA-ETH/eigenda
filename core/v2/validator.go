@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,27 +16,32 @@ var (
 	ErrBlobQuorumSkip      = errors.New("blob skipped for a quorum before verification")
 )
 
+type ShardValidator interface {
+	ValidateBatchHeader(ctx context.Context, header *BatchHeader, blobCerts []*BlobCertificate) error
+	ValidateBlobs(ctx context.Context, blobs []*BlobShard, pool common.WorkerPool, state *core.OperatorState) error
+}
+
 type BlobShard struct {
-	BlobCertificate
-	Chunks map[core.QuorumID][]*encoding.Frame
+	*BlobCertificate
+	Bundles core.Bundles
 }
 
 // shardValidator implements the validation logic that a DA node should apply to its received data
-type ShardValidator struct {
+type shardValidator struct {
 	verifier   encoding.Verifier
-	chainState core.ChainState
 	operatorID core.OperatorID
 }
 
-func NewShardValidator(v encoding.Verifier, cst core.ChainState, operatorID core.OperatorID) *ShardValidator {
-	return &ShardValidator{
+var _ ShardValidator = (*shardValidator)(nil)
+
+func NewShardValidator(v encoding.Verifier, operatorID core.OperatorID) *shardValidator {
+	return &shardValidator{
 		verifier:   v,
-		chainState: cst,
 		operatorID: operatorID,
 	}
 }
 
-func (v *ShardValidator) validateBlobQuorum(quorum core.QuorumID, blob *BlobShard, operatorState *core.OperatorState) ([]*encoding.Frame, *Assignment, error) {
+func (v *shardValidator) validateBlobQuorum(quorum core.QuorumID, blob *BlobShard, operatorState *core.OperatorState) ([]*encoding.Frame, *Assignment, error) {
 
 	// Check if the operator is a member of the quorum
 	if _, ok := operatorState.Operators[quorum]; !ok {
@@ -43,7 +49,7 @@ func (v *ShardValidator) validateBlobQuorum(quorum core.QuorumID, blob *BlobShar
 	}
 
 	// Get the assignments for the quorum
-	assignment, err := GetAssignment(operatorState, blob.Version, quorum, v.operatorID)
+	assignment, err := GetAssignment(operatorState, blob.BlobHeader.BlobVersion, quorum, v.operatorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -52,18 +58,17 @@ func (v *ShardValidator) validateBlobQuorum(quorum core.QuorumID, blob *BlobShar
 	if assignment.NumChunks == 0 {
 		return nil, nil, fmt.Errorf("%w: operator %s has no chunks in quorum %d", ErrBlobQuorumSkip, v.operatorID.Hex(), quorum)
 	}
-	if assignment.NumChunks != uint32(len(blob.Chunks[quorum])) {
-		return nil, nil, fmt.Errorf("number of chunks (%d) does not match assignment (%d) for quorum %d", len(blob.Chunks[quorum]), assignment.NumChunks, quorum)
+	if assignment.NumChunks != uint32(len(blob.Bundles[quorum])) {
+		return nil, nil, fmt.Errorf("number of chunks (%d) does not match assignment (%d) for quorum %d", len(blob.Bundles[quorum]), assignment.NumChunks, quorum)
 	}
 
-	// Validate the chunkLength against the confirmation and adversary threshold parameters
-	chunkLength, err := GetChunkLength(blob.Version, uint32(blob.BlobHeader.Length))
+	// Get the chunk length
+	chunkLength, err := GetChunkLength(blob.BlobHeader.BlobVersion, uint32(blob.BlobHeader.BlobCommitments.Length))
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid chunk length: %w", err)
 	}
 
-	// Get the chunk length
-	chunks := blob.Chunks[quorum]
+	chunks := blob.Bundles[quorum]
 	for _, chunk := range chunks {
 		if uint32(chunk.Length()) != chunkLength {
 			return nil, nil, fmt.Errorf("%w: chunk length (%d) does not match quorum header (%d) for quorum %d", ErrChunkLengthMismatch, chunk.Length(), chunkLength, quorum)
@@ -73,19 +78,35 @@ func (v *ShardValidator) validateBlobQuorum(quorum core.QuorumID, blob *BlobShar
 	return chunks, &assignment, nil
 }
 
-func (v *ShardValidator) ValidateBlobs(ctx context.Context, blobs []*BlobShard, pool common.WorkerPool) error {
+func (v *shardValidator) ValidateBatchHeader(ctx context.Context, header *BatchHeader, blobCerts []*BlobCertificate) error {
+	if header == nil {
+		return fmt.Errorf("batch header is nil")
+	}
+
+	if len(blobCerts) == 0 {
+		return fmt.Errorf("no blob certificates")
+	}
+
+	tree, err := BuildMerkleTree(blobCerts)
+	if err != nil {
+		return fmt.Errorf("failed to build merkle tree: %v", err)
+	}
+
+	if !bytes.Equal(tree.Root(), header.BatchRoot[:]) {
+		return fmt.Errorf("batch root does not match")
+	}
+
+	return nil
+}
+
+func (v *shardValidator) ValidateBlobs(ctx context.Context, blobs []*BlobShard, pool common.WorkerPool, state *core.OperatorState) error {
 	var err error
 	subBatchMap := make(map[encoding.EncodingParams]*encoding.SubBatch)
 	blobCommitmentList := make([]encoding.BlobCommitments, len(blobs))
 
 	for k, blob := range blobs {
-		if len(blob.Chunks) != len(blob.BlobHeader.QuorumNumbers) {
-			return fmt.Errorf("number of bundles (%d) does not match number of quorums (%d)", len(blob.Chunks), len(blob.BlobHeader.QuorumNumbers))
-		}
-
-		state, err := v.chainState.GetOperatorState(ctx, uint(blob.ReferenceBlockNumber), blob.BlobHeader.QuorumNumbers)
-		if err != nil {
-			return err
+		if len(blob.Bundles) != len(blob.BlobHeader.QuorumNumbers) {
+			return fmt.Errorf("number of bundles (%d) does not match number of quorums (%d)", len(blob.Bundles), len(blob.BlobHeader.QuorumNumbers))
 		}
 
 		// Saved for the blob length validation
@@ -98,7 +119,7 @@ func (v *ShardValidator) ValidateBlobs(ctx context.Context, blobs []*BlobShard, 
 				return err
 			}
 			// TODO: Define params for the blob
-			params, err := blob.GetEncodingParams()
+			params, err := blob.BlobHeader.GetEncodingParams()
 			if err != nil {
 				return err
 			}
@@ -158,7 +179,7 @@ func (v *ShardValidator) ValidateBlobs(ctx context.Context, blobs []*BlobShard, 
 	for _, blobCommitments := range blobCommitmentList {
 		blobCommitments := blobCommitments
 		pool.Submit(func() {
-			v.VerifyBlobLengthWorker(blobCommitments, out)
+			v.verifyBlobLengthWorker(blobCommitments, out)
 		})
 	}
 	// check if commitments are equivalent
@@ -177,7 +198,7 @@ func (v *ShardValidator) ValidateBlobs(ctx context.Context, blobs []*BlobShard, 
 	return nil
 }
 
-func (v *ShardValidator) universalVerifyWorker(params encoding.EncodingParams, subBatch *encoding.SubBatch, out chan error) {
+func (v *shardValidator) universalVerifyWorker(params encoding.EncodingParams, subBatch *encoding.SubBatch, out chan error) {
 
 	err := v.verifier.UniversalVerifySubBatch(params, subBatch.Samples, subBatch.NumBlobs)
 	if err != nil {
@@ -188,7 +209,7 @@ func (v *ShardValidator) universalVerifyWorker(params encoding.EncodingParams, s
 	out <- nil
 }
 
-func (v *ShardValidator) VerifyBlobLengthWorker(blobCommitments encoding.BlobCommitments, out chan error) {
+func (v *shardValidator) verifyBlobLengthWorker(blobCommitments encoding.BlobCommitments, out chan error) {
 	err := v.verifier.VerifyBlobLength(blobCommitments)
 	if err != nil {
 		out <- err

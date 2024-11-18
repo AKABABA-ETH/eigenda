@@ -84,7 +84,7 @@ func makeTestComponents() (encoding.Prover, encoding.Verifier, error) {
 	return p, v, nil
 }
 
-func makeTestBlob(t *testing.T, p encoding.Prover, version uint8, refBlockNumber uint64, length int, quorums []core.QuorumID) (corev2.BlobCertificate, []byte) {
+func makeTestBlob(t *testing.T, p encoding.Prover, version corev2.BlobVersion, length int, quorums []core.QuorumID) (corev2.BlobCertificate, []byte) {
 
 	data := make([]byte, length*31)
 	_, err := rand.Read(data)
@@ -100,12 +100,11 @@ func makeTestBlob(t *testing.T, p encoding.Prover, version uint8, refBlockNumber
 	}
 
 	header := corev2.BlobCertificate{
-		BlobHeader: corev2.BlobHeader{
-			Version:         version,
+		BlobHeader: &corev2.BlobHeader{
+			BlobVersion:     version,
 			QuorumNumbers:   quorums,
 			BlobCommitments: commitments,
 		},
-		ReferenceBlockNumber: refBlockNumber,
 	}
 
 	return header, data
@@ -114,7 +113,13 @@ func makeTestBlob(t *testing.T, p encoding.Prover, version uint8, refBlockNumber
 
 // prepareBlobs takes in multiple blob, encodes them, generates the associated assignments, and the batch header.
 // These are the products that a disperser will need in order to disperse data to the DA nodes.
-func prepareBlobs(t *testing.T, operatorCount uint, headers []corev2.BlobCertificate, blobs [][]byte) (map[core.OperatorID][]*corev2.BlobShard, core.IndexedChainState) {
+func prepareBlobs(
+	t *testing.T,
+	operatorCount uint,
+	certs []corev2.BlobCertificate,
+	blobs [][]byte,
+	referenceBlockNumber uint64,
+) (map[core.OperatorID][]*corev2.BlobShard, core.IndexedChainState) {
 
 	cst, err := mock.MakeChainDataMock(map[uint8]int{
 		0: int(operatorCount),
@@ -123,11 +128,11 @@ func prepareBlobs(t *testing.T, operatorCount uint, headers []corev2.BlobCertifi
 	})
 	assert.NoError(t, err)
 
-	blobsMap := make([]map[core.QuorumID]map[core.OperatorID][]*encoding.Frame, 0, len(headers))
+	blobsMap := make([]map[core.QuorumID]map[core.OperatorID][]*encoding.Frame, 0, len(certs))
 
-	for z, header := range headers {
-
+	for z, cert := range certs {
 		blob := blobs[z]
+		header := cert.BlobHeader
 
 		params, err := header.GetEncodingParams()
 		if err != nil {
@@ -139,7 +144,7 @@ func prepareBlobs(t *testing.T, operatorCount uint, headers []corev2.BlobCertifi
 			t.Fatal(err)
 		}
 
-		state, err := cst.GetOperatorState(context.Background(), uint(header.ReferenceBlockNumber), header.QuorumNumbers)
+		state, err := cst.GetOperatorState(context.Background(), uint(referenceBlockNumber), header.QuorumNumbers)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,7 +153,7 @@ func prepareBlobs(t *testing.T, operatorCount uint, headers []corev2.BlobCertifi
 
 		for _, quorum := range header.QuorumNumbers {
 
-			assignments, err := corev2.GetAssignments(state, header.Version, quorum)
+			assignments, err := corev2.GetAssignments(state, header.BlobVersion, quorum)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,14 +182,14 @@ func prepareBlobs(t *testing.T, operatorCount uint, headers []corev2.BlobCertifi
 				}
 				if len(inverseMap[operatorID]) < blobIndex+1 {
 					inverseMap[operatorID] = append(inverseMap[operatorID], &corev2.BlobShard{
-						BlobCertificate: headers[blobIndex],
-						Chunks:          make(map[core.QuorumID][]*encoding.Frame),
+						BlobCertificate: &certs[blobIndex],
+						Bundles:         make(map[core.QuorumID]core.Bundle),
 					})
 				}
 				if len(frames) == 0 {
 					continue
 				}
-				inverseMap[operatorID][blobIndex].Chunks[quorum] = append(inverseMap[operatorID][blobIndex].Chunks[quorum], frames...)
+				inverseMap[operatorID][blobIndex].Bundles[quorum] = append(inverseMap[operatorID][blobIndex].Bundles[quorum], frames...)
 
 			}
 		}
@@ -196,23 +201,26 @@ func prepareBlobs(t *testing.T, operatorCount uint, headers []corev2.BlobCertifi
 
 // checkBatchByUniversalVerifier runs the verification logic for each DA node in the current OperatorState, and returns an error if any of
 // the DA nodes' validation checks fails
-func checkBatchByUniversalVerifier(cst core.IndexedChainState, packagedBlobs map[core.OperatorID][]*corev2.BlobShard, pool common.WorkerPool) error {
+func checkBatchByUniversalVerifier(
+	cst core.IndexedChainState,
+	packagedBlobs map[core.OperatorID][]*corev2.BlobShard,
+	pool common.WorkerPool,
+) error {
 
 	ctx := context.Background()
 
 	quorums := []core.QuorumID{0, 1}
 	state, _ := cst.GetIndexedOperatorState(context.Background(), 0, quorums)
-	// numBlob := len(encodedBlobs)
 
 	var errList *multierror.Error
 
 	for id := range state.IndexedOperators {
 
-		val := corev2.NewShardValidator(v, cst, id)
+		val := corev2.NewShardValidator(v, id)
 
 		blobs := packagedBlobs[id]
 
-		err := val.ValidateBlobs(ctx, blobs, pool)
+		err := val.ValidateBlobs(ctx, blobs, pool, state.OperatorState)
 		if err != nil {
 			errList = multierror.Append(errList, err)
 		}
@@ -236,9 +244,9 @@ func TestValidationSucceeds(t *testing.T) {
 
 	quorumNumbers := []core.QuorumID{0, 1}
 
-	bn := uint64(0)
+	bn := uint64(1000)
 
-	version := uint8(0)
+	version := corev2.BlobVersion(0)
 
 	pool := workerpool.New(1)
 
@@ -249,13 +257,13 @@ func TestValidationSucceeds(t *testing.T) {
 		blobs := make([][]byte, 0)
 		for _, blobLength := range blobLengths {
 			for i := 0; i < numBlob; i++ {
-				header, data := makeTestBlob(t, p, version, bn, blobLength, quorumNumbers)
+				header, data := makeTestBlob(t, p, version, blobLength, quorumNumbers)
 				headers = append(headers, header)
 				blobs = append(blobs, data)
 			}
 		}
 
-		packagedBlobs, cst := prepareBlobs(t, operatorCount, headers, blobs)
+		packagedBlobs, cst := prepareBlobs(t, operatorCount, headers, blobs, bn)
 
 		t.Run(fmt.Sprintf("universal verifier operatorCount=%v over %v blobs", operatorCount, len(blobs)), func(t *testing.T) {
 			err := checkBatchByUniversalVerifier(cst, packagedBlobs, pool)
