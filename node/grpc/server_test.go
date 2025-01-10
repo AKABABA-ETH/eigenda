@@ -60,14 +60,15 @@ func makeTestComponents() (encoding.Prover, encoding.Verifier, error) {
 		SRSOrder:        300000,
 		SRSNumberToLoad: 300000,
 		NumWorker:       uint64(runtime.GOMAXPROCS(0)),
+		LoadG2Points:    true,
 	}
 
-	p, err := prover.NewProver(config, true)
+	p, err := prover.NewProver(config, nil)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	v, err := verifier.NewVerifier(config, true)
+	v, err := verifier.NewVerifier(config, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -77,12 +78,14 @@ func makeTestComponents() (encoding.Prover, encoding.Verifier, error) {
 
 func makeConfig(t *testing.T) *node.Config {
 	return &node.Config{
-		Timeout:                   10 * time.Second,
-		ExpirationPollIntervalSec: 1,
-		QuorumIDList:              []core.QuorumID{0},
-		DbPath:                    t.TempDir(),
-		ID:                        opID,
-		NumBatchValidators:        runtime.GOMAXPROCS(0),
+		Timeout:                        10 * time.Second,
+		ExpirationPollIntervalSec:      1,
+		QuorumIDList:                   []core.QuorumID{0},
+		DbPath:                         t.TempDir(),
+		ID:                             opID,
+		NumBatchValidators:             runtime.GOMAXPROCS(0),
+		EnableV2:                       false,
+		DisableDispersalAuthentication: true,
 	}
 }
 

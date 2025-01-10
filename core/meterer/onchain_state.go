@@ -2,22 +2,24 @@ package meterer
 
 import (
 	"context"
-	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Layr-Labs/eigenda/core"
 	"github.com/Layr-Labs/eigenda/core/eth"
+	gethcommon "github.com/ethereum/go-ethereum/common"
 )
 
 // PaymentAccounts (For reservations and on-demand payments)
 
 // OnchainPaymentState is an interface for getting information about the current chain state for payments.
 type OnchainPayment interface {
-	RefreshOnchainPaymentState(ctx context.Context, tx *eth.Reader) error
-	GetActiveReservationByAccount(ctx context.Context, accountID string) (core.ActiveReservation, error)
-	GetOnDemandPaymentByAccount(ctx context.Context, accountID string) (core.OnDemandPayment, error)
+	RefreshOnchainPaymentState(ctx context.Context) error
+	GetReservedPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*core.ReservedPayment, error)
+	GetOnDemandPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*core.OnDemandPayment, error)
 	GetOnDemandQuorumNumbers(ctx context.Context) ([]uint8, error)
 	GetGlobalSymbolsPerSecond() uint64
+	GetGlobalRatePeriodInterval() uint32
 	GetMinNumSymbols() uint32
 	GetPricePerSymbol() uint32
 	GetReservationWindow() uint32
@@ -28,142 +30,160 @@ var _ OnchainPayment = (*OnchainPaymentState)(nil)
 type OnchainPaymentState struct {
 	tx *eth.Reader
 
-	ActiveReservations map[string]core.ActiveReservation
-	OnDemandPayments   map[string]core.OnDemandPayment
+	ReservedPayments map[gethcommon.Address]*core.ReservedPayment
+	OnDemandPayments map[gethcommon.Address]*core.OnDemandPayment
 
 	ReservationsLock sync.RWMutex
 	OnDemandLocks    sync.RWMutex
 
-	PaymentVaultParams PaymentVaultParams
+	PaymentVaultParams atomic.Pointer[PaymentVaultParams]
 }
 
 type PaymentVaultParams struct {
-	GlobalSymbolsPerSecond uint64
-	MinNumSymbols          uint32
-	PricePerSymbol         uint32
-	ReservationWindow      uint32
-	OnDemandQuorumNumbers  []uint8
+	GlobalSymbolsPerSecond   uint64
+	GlobalRatePeriodInterval uint32
+	MinNumSymbols            uint32
+	PricePerSymbol           uint32
+	ReservationWindow        uint32
+	OnDemandQuorumNumbers    []uint8
 }
 
-func NewOnchainPaymentState(ctx context.Context, tx *eth.Reader) (OnchainPaymentState, error) {
-	paymentVaultParams, err := GetPaymentVaultParams(ctx, tx)
-	if err != nil {
-		return OnchainPaymentState{}, err
-	}
-
-	return OnchainPaymentState{
+func NewOnchainPaymentState(ctx context.Context, tx *eth.Reader) (*OnchainPaymentState, error) {
+	state := OnchainPaymentState{
 		tx:                 tx,
-		ActiveReservations: make(map[string]core.ActiveReservation),
-		OnDemandPayments:   make(map[string]core.OnDemandPayment),
-		PaymentVaultParams: paymentVaultParams,
-	}, nil
+		ReservedPayments:   make(map[gethcommon.Address]*core.ReservedPayment),
+		OnDemandPayments:   make(map[gethcommon.Address]*core.OnDemandPayment),
+		PaymentVaultParams: atomic.Pointer[PaymentVaultParams]{},
+	}
+
+	paymentVaultParams, err := state.GetPaymentVaultParams(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	state.PaymentVaultParams.Store(paymentVaultParams)
+
+	return &state, nil
 }
 
-func GetPaymentVaultParams(ctx context.Context, tx *eth.Reader) (PaymentVaultParams, error) {
-	blockNumber, err := tx.GetCurrentBlockNumber(ctx)
+func (pcs *OnchainPaymentState) GetPaymentVaultParams(ctx context.Context) (*PaymentVaultParams, error) {
+	quorumNumbers, err := pcs.GetOnDemandQuorumNumbers(ctx)
 	if err != nil {
-		return PaymentVaultParams{}, err
+		return nil, err
 	}
 
-	quorumNumbers, err := tx.GetRequiredQuorumNumbers(ctx, blockNumber)
+	globalSymbolsPerSecond, err := pcs.tx.GetGlobalSymbolsPerSecond(ctx)
 	if err != nil {
-		return PaymentVaultParams{}, err
+		return nil, err
 	}
 
-	globalSymbolsPerSecond, err := tx.GetGlobalSymbolsPerSecond(ctx)
+	globalRatePeriodInterval, err := pcs.tx.GetGlobalRatePeriodInterval(ctx)
 	if err != nil {
-		return PaymentVaultParams{}, err
+		return nil, err
 	}
 
-	minNumSymbols, err := tx.GetMinNumSymbols(ctx)
+	minNumSymbols, err := pcs.tx.GetMinNumSymbols(ctx)
 	if err != nil {
-		return PaymentVaultParams{}, err
+		return nil, err
 	}
 
-	pricePerSymbol, err := tx.GetPricePerSymbol(ctx)
+	pricePerSymbol, err := pcs.tx.GetPricePerSymbol(ctx)
 	if err != nil {
-		return PaymentVaultParams{}, err
+		return nil, err
 	}
 
-	reservationWindow, err := tx.GetReservationWindow(ctx)
+	reservationWindow, err := pcs.tx.GetReservationWindow(ctx)
 	if err != nil {
-		return PaymentVaultParams{}, err
+		return nil, err
 	}
 
-	return PaymentVaultParams{
-		OnDemandQuorumNumbers:  quorumNumbers,
-		GlobalSymbolsPerSecond: globalSymbolsPerSecond,
-		MinNumSymbols:          minNumSymbols,
-		PricePerSymbol:         pricePerSymbol,
-		ReservationWindow:      reservationWindow,
+	return &PaymentVaultParams{
+		OnDemandQuorumNumbers:    quorumNumbers,
+		GlobalSymbolsPerSecond:   globalSymbolsPerSecond,
+		GlobalRatePeriodInterval: globalRatePeriodInterval,
+		MinNumSymbols:            minNumSymbols,
+		PricePerSymbol:           pricePerSymbol,
+		ReservationWindow:        reservationWindow,
 	}, nil
 }
 
 // RefreshOnchainPaymentState returns the current onchain payment state
-func (pcs *OnchainPaymentState) RefreshOnchainPaymentState(ctx context.Context, tx *eth.Reader) error {
-	paymentVaultParams, err := GetPaymentVaultParams(ctx, tx)
+func (pcs *OnchainPaymentState) RefreshOnchainPaymentState(ctx context.Context) error {
+	paymentVaultParams, err := pcs.GetPaymentVaultParams(ctx)
 	if err != nil {
 		return err
 	}
 	// These parameters should be rarely updated, but we refresh them anyway
-	pcs.PaymentVaultParams = paymentVaultParams
+	pcs.PaymentVaultParams.Store(paymentVaultParams)
+
+	pcs.ReservationsLock.Lock()
+	accountIDs := make([]gethcommon.Address, 0, len(pcs.ReservedPayments))
+	for accountID := range pcs.ReservedPayments {
+		accountIDs = append(accountIDs, accountID)
+	}
+
+	reservedPayments, err := pcs.tx.GetReservedPayments(ctx, accountIDs)
+	if err != nil {
+		return err
+	}
+	pcs.ReservedPayments = reservedPayments
+	pcs.ReservationsLock.Unlock()
+
+	pcs.OnDemandLocks.Lock()
+	accountIDs = make([]gethcommon.Address, 0, len(pcs.OnDemandPayments))
+	for accountID := range pcs.OnDemandPayments {
+		accountIDs = append(accountIDs, accountID)
+	}
+
+	onDemandPayments, err := pcs.tx.GetOnDemandPayments(ctx, accountIDs)
+	if err != nil {
+		return err
+	}
+	pcs.OnDemandPayments = onDemandPayments
+	pcs.OnDemandLocks.Unlock()
+
 	return nil
 }
 
-// GetActiveReservationByAccount returns a pointer to the active reservation for the given account ID; no writes will be made to the reservation
-func (pcs *OnchainPaymentState) GetActiveReservationByAccount(ctx context.Context, accountID string) (core.ActiveReservation, error) {
-	if reservation, ok := pcs.ActiveReservations[accountID]; ok {
+// GetReservedPaymentByAccount returns a pointer to the active reservation for the given account ID; no writes will be made to the reservation
+func (pcs *OnchainPaymentState) GetReservedPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*core.ReservedPayment, error) {
+	pcs.ReservationsLock.RLock()
+	if reservation, ok := (pcs.ReservedPayments)[accountID]; ok {
+		pcs.ReservationsLock.RUnlock()
 		return reservation, nil
 	}
-	res, err := pcs.GetActiveReservationByAccountOnChain(ctx, accountID)
-	if err != nil {
-		return core.ActiveReservation{}, err
-	}
+	pcs.ReservationsLock.RUnlock()
 
+	// pulls the chain state
+	res, err := pcs.tx.GetReservedPaymentByAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
 	pcs.ReservationsLock.Lock()
-	pcs.ActiveReservations[accountID] = res
+	(pcs.ReservedPayments)[accountID] = res
 	pcs.ReservationsLock.Unlock()
-	return res, nil
-}
 
-// GetActiveReservationByAccountOnChain returns on-chain reservation for the given account ID
-func (pcs *OnchainPaymentState) GetActiveReservationByAccountOnChain(ctx context.Context, accountID string) (core.ActiveReservation, error) {
-	blockNumber, err := pcs.tx.GetCurrentBlockNumber(ctx)
-	if err != nil {
-		return core.ActiveReservation{}, err
-	}
-	res, err := pcs.tx.GetActiveReservationByAccount(ctx, blockNumber, accountID)
-	if err != nil {
-		return core.ActiveReservation{}, fmt.Errorf("reservation account not found on-chain: %w", err)
-	}
 	return res, nil
 }
 
 // GetOnDemandPaymentByAccount returns a pointer to the on-demand payment for the given account ID; no writes will be made to the payment
-func (pcs *OnchainPaymentState) GetOnDemandPaymentByAccount(ctx context.Context, accountID string) (core.OnDemandPayment, error) {
-	if payment, ok := pcs.OnDemandPayments[accountID]; ok {
+func (pcs *OnchainPaymentState) GetOnDemandPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*core.OnDemandPayment, error) {
+	pcs.OnDemandLocks.RLock()
+	if payment, ok := (pcs.OnDemandPayments)[accountID]; ok {
+		pcs.OnDemandLocks.RUnlock()
 		return payment, nil
 	}
-	res, err := pcs.GetOnDemandPaymentByAccountOnChain(ctx, accountID)
+	pcs.OnDemandLocks.RUnlock()
+
+	// pulls the chain state
+	res, err := pcs.tx.GetOnDemandPaymentByAccount(ctx, accountID)
 	if err != nil {
-		return core.OnDemandPayment{}, err
+		return nil, err
 	}
 
 	pcs.OnDemandLocks.Lock()
-	pcs.OnDemandPayments[accountID] = res
+	(pcs.OnDemandPayments)[accountID] = res
 	pcs.OnDemandLocks.Unlock()
-	return res, nil
-}
-
-func (pcs *OnchainPaymentState) GetOnDemandPaymentByAccountOnChain(ctx context.Context, accountID string) (core.OnDemandPayment, error) {
-	blockNumber, err := pcs.tx.GetCurrentBlockNumber(ctx)
-	if err != nil {
-		return core.OnDemandPayment{}, err
-	}
-	res, err := pcs.tx.GetOnDemandPaymentByAccount(ctx, blockNumber, accountID)
-	if err != nil {
-		return core.OnDemandPayment{}, fmt.Errorf("on-demand not found on-chain: %w", err)
-	}
 	return res, nil
 }
 
@@ -176,17 +196,21 @@ func (pcs *OnchainPaymentState) GetOnDemandQuorumNumbers(ctx context.Context) ([
 }
 
 func (pcs *OnchainPaymentState) GetGlobalSymbolsPerSecond() uint64 {
-	return pcs.PaymentVaultParams.GlobalSymbolsPerSecond
+	return pcs.PaymentVaultParams.Load().GlobalSymbolsPerSecond
+}
+
+func (pcs *OnchainPaymentState) GetGlobalRatePeriodInterval() uint32 {
+	return pcs.PaymentVaultParams.Load().GlobalRatePeriodInterval
 }
 
 func (pcs *OnchainPaymentState) GetMinNumSymbols() uint32 {
-	return pcs.PaymentVaultParams.MinNumSymbols
+	return pcs.PaymentVaultParams.Load().MinNumSymbols
 }
 
 func (pcs *OnchainPaymentState) GetPricePerSymbol() uint32 {
-	return pcs.PaymentVaultParams.PricePerSymbol
+	return pcs.PaymentVaultParams.Load().PricePerSymbol
 }
 
 func (pcs *OnchainPaymentState) GetReservationWindow() uint32 {
-	return pcs.PaymentVaultParams.ReservationWindow
+	return pcs.PaymentVaultParams.Load().ReservationWindow
 }

@@ -102,6 +102,20 @@ var (
 		EnvVar:   common.PrefixEnvVar(envVarPrefix, "NUM_CONCURRENT_ENCODING_REQUESTS"),
 		Value:    250,
 	}
+	MaxNumBlobsPerIterationFlag = cli.IntFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "max-num-blobs-per-iteration"),
+		Usage:    "Max number of blobs to encode in a single iteration",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "MAX_NUM_BLOBS_PER_ITERATION"),
+		Value:    128,
+	}
+	OnchainStateRefreshIntervalFlag = cli.DurationFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "onchain-state-refresh-interval"),
+		Usage:    "Interval at which to refresh the onchain state",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "ONCHAIN_STATE_REFRESH_INTERVAL"),
+		Value:    1 * time.Hour,
+	}
 
 	// Dispatcher Flags
 	DispatcherPullIntervalFlag = cli.DurationFlag{
@@ -150,6 +164,32 @@ var (
 		EnvVar:   common.PrefixEnvVar(envVarPrefix, "NODE_CLIENT_CACHE_NUM_ENTRIES"),
 		Value:    400,
 	}
+	MaxBatchSizeFlag = cli.IntFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "max-batch-size"),
+		Usage:    "Max number of blobs to disperse in a batch",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "MAX_BATCH_SIZE"),
+		Value:    128,
+	}
+	MetricsPortFlag = cli.IntFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "metrics-port"),
+		Usage:    "Port to expose metrics",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "METRICS_PORT"),
+		Value:    9101,
+	}
+	DisperserStoreChunksSigningDisabledFlag = cli.BoolFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "disperser-store-chunks-signing-disabled"),
+		Usage:    "Whether to disable signing of store chunks requests",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "DISPERSER_STORE_CHUNKS_SIGNING_DISABLED"),
+	}
+	DisperserKMSKeyIDFlag = cli.StringFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "disperser-kms-key-id"),
+		Usage:    "Name of the key used to sign disperser requests (key must be stored in AWS KMS under this name)",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "DISPERSER_KMS_KEY_ID"),
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -160,6 +200,7 @@ var requiredFlags = []cli.Flag{
 	EncodingPullIntervalFlag,
 	AvailableRelaysFlag,
 	EncoderAddressFlag,
+
 	DispatcherPullIntervalFlag,
 	NodeRequestTimeoutFlag,
 	NumConnectionsToNodesFlag,
@@ -172,10 +213,17 @@ var optionalFlags = []cli.Flag{
 	NumEncodingRetriesFlag,
 	NumRelayAssignmentFlag,
 	NumConcurrentEncodingRequestsFlag,
+	MaxNumBlobsPerIterationFlag,
+	OnchainStateRefreshIntervalFlag,
+
 	FinalizationBlockDelayFlag,
 	NumRequestRetriesFlag,
 	NumConcurrentDispersalRequestsFlag,
 	NodeClientCacheNumEntriesFlag,
+	MaxBatchSizeFlag,
+	MetricsPortFlag,
+	DisperserStoreChunksSigningDisabledFlag,
+	DisperserKMSKeyIDFlag,
 }
 
 var Flags []cli.Flag

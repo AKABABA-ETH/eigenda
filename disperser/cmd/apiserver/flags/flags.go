@@ -9,6 +9,7 @@ import (
 	"github.com/Layr-Labs/eigenda/common/geth"
 	"github.com/Layr-Labs/eigenda/common/ratelimit"
 	"github.com/Layr-Labs/eigenda/disperser/apiserver"
+	"github.com/Layr-Labs/eigenda/encoding"
 	"github.com/Layr-Labs/eigenda/encoding/kzg"
 	"github.com/urfave/cli"
 )
@@ -106,14 +107,7 @@ var (
 		Value:  "global_rate",
 		EnvVar: common.PrefixEnvVar(envVarPrefix, "GLOBAL_RATE_TABLE_NAME"),
 	}
-	UpdateInterval = cli.DurationFlag{
-		Name:     common.PrefixFlag(FlagPrefix, "update-interval"),
-		Usage:    "update interval for refreshing the on-chain state",
-		Value:    1 * time.Second,
-		EnvVar:   common.PrefixEnvVar(envVarPrefix, "UPDATE_INTERVAL"),
-		Required: false,
-	}
-	ChainReadTimeout = cli.UintFlag{
+	ChainReadTimeout = cli.DurationFlag{
 		Name:     common.PrefixFlag(FlagPrefix, "chain-read-timeout"),
 		Usage:    "timeout for reading from the chain",
 		Value:    10,
@@ -145,14 +139,27 @@ var (
 		Usage:    "The interval at which to refresh the onchain state. This flag is only relevant in v2",
 		Required: false,
 		EnvVar:   common.PrefixEnvVar(envVarPrefix, "ONCHAIN_STATE_REFRESH_INTERVAL"),
-		Value:    1 * time.Hour,
+		Value:    1 * time.Minute,
 	}
 	MaxNumSymbolsPerBlob = cli.UintFlag{
 		Name:     common.PrefixFlag(FlagPrefix, "max-num-symbols-per-blob"),
 		Usage:    "max number of symbols per blob. This flag is only relevant in v2",
-		Value:    65_536,
+		Value:    16 * 1024 * 1024 / encoding.BYTES_PER_SYMBOL, // this should allow for 16MiB blobs
 		EnvVar:   common.PrefixEnvVar(envVarPrefix, "MAX_NUM_SYMBOLS_PER_BLOB"),
 		Required: false,
+	}
+	PprofHttpPort = cli.StringFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "pprof-http-port"),
+		Usage:    "the http port which the pprof server is listening",
+		Required: false,
+		Value:    "6060",
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "PPROF_HTTP_PORT"),
+	}
+	EnablePprof = cli.BoolFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "enable-pprof"),
+		Usage:    "start prrof server",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(envVarPrefix, "ENABLE_PPROF"),
 	}
 )
 
@@ -246,6 +253,8 @@ var optionalFlags = []cli.Flag{
 	GlobalRateTableName,
 	OnchainStateRefreshInterval,
 	MaxNumSymbolsPerBlob,
+	PprofHttpPort,
+	EnablePprof,
 }
 
 // Flags contains the list of configuration options available to the binary.

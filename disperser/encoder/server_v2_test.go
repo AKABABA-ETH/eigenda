@@ -18,10 +18,18 @@ import (
 	"github.com/Layr-Labs/eigenda/encoding/kzg/prover"
 	"github.com/Layr-Labs/eigenda/encoding/utils/codec"
 	"github.com/Layr-Labs/eigenda/relay/chunkstore"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/exp/rand"
 )
+
+var blobParams = &core.BlobVersionParameters{
+	NumChunks:       8192,
+	CodingRate:      8,
+	MaxNumOperators: 3537,
+}
 
 type testComponents struct {
 	encoderServer    *encoder.EncoderServerV2
@@ -42,9 +50,9 @@ func makeTestProver(numPoint uint64) (encoding.Prover, error) {
 		SRSOrder:        300000,
 		SRSNumberToLoad: numPoint,
 		NumWorker:       uint64(runtime.GOMAXPROCS(0)),
+		LoadG2Points:    false,
 	}
-
-	p, err := prover.NewProver(kzgConfig, false)
+	p, err := prover.NewProver(kzgConfig, nil)
 
 	return p, err
 }
@@ -52,13 +60,13 @@ func makeTestProver(numPoint uint64) (encoding.Prover, error) {
 func TestEncodeBlob(t *testing.T) {
 	const (
 		testDataSize   = 16 * 1024
-		timeoutSeconds = 30
+		timeoutSeconds = 60
 		randSeed       = uint64(42)
 	)
 
 	var (
-		codingRatio = corev2.ParametersMap[0].CodingRate
-		numChunks   = corev2.ParametersMap[0].NumChunks
+		codingRatio = blobParams.CodingRate
+		numChunks   = blobParams.NumChunks
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeoutSeconds*time.Second)
@@ -84,7 +92,7 @@ func TestEncodeBlob(t *testing.T) {
 	blobLength := encoding.GetBlobLength(blobSize)
 
 	// Get chunk length for blob version 0
-	chunkLength, err := corev2.GetChunkLength(0, core.NextPowerOf2(uint32(blobLength)))
+	chunkLength, err := corev2.GetChunkLength(core.NextPowerOf2(uint32(blobLength)), blobParams)
 	if !assert.NoError(t, err, "Failed to get chunk length") {
 		t.FailNow()
 	}
@@ -169,6 +177,12 @@ func TestEncodeBlob(t *testing.T) {
 		// Create and execute encoding request again
 		resp, err := server.EncodeBlob(ctx, req)
 		assert.NoError(t, err)
+
+		if !assert.NotNil(t, resp, "Response should not be nil") {
+			t.FailNow() // Stop the test here to prevent nil pointer panic
+			return
+		}
+
 		assert.Equal(t, uint32(294916), resp.FragmentInfo.TotalChunkSizeBytes, "Unexpected total chunk size")
 		assert.Equal(t, uint32(512*1024), resp.FragmentInfo.FragmentSizeBytes, "Unexpected fragment size")
 		assert.Equal(t, c.s3Client.Called["UploadObject"], expectedUploadCalls)
@@ -185,7 +199,7 @@ func createTestBlobHeader(t *testing.T) *corev2.BlobHeader {
 		BlobCommitments: mockCommitment,
 		PaymentMetadata: core.PaymentMetadata{
 			AccountID:         "0x1234",
-			BinIndex:          0,
+			ReservationPeriod: 0,
 			CumulativePayment: big.NewInt(532),
 		},
 	}
@@ -196,7 +210,12 @@ func createTestComponents(t *testing.T) *testComponents {
 	t.Helper()
 	prover, err := makeTestProver(300000)
 	require.NoError(t, err, "Failed to create prover")
-	metrics := encoder.NewMetrics("9000", logger)
+
+	registry := prometheus.NewRegistry()
+	metrics := encoder.NewMetrics(registry, "9000", logger)
+	grpcMetrics := grpcprom.NewServerMetrics()
+	registry.MustRegister(grpcMetrics)
+
 	s3Client := mock.NewS3Client()
 	dynamoDBClient := &mock.MockDynamoDBClient{}
 	blobStore := blobstore.NewBlobStore(s3BucketName, s3Client, logger)
@@ -205,9 +224,9 @@ func createTestComponents(t *testing.T) *testComponents {
 	encoderServer := encoder.NewEncoderServerV2(encoder.ServerConfig{
 		GrpcPort:              "8080",
 		MaxConcurrentRequests: 10,
-		RequestPoolSize:       5,
+		RequestQueueSize:      5,
 		PreventReencoding:     true,
-	}, blobStore, chunkStoreWriter, logger, prover, metrics)
+	}, blobStore, chunkStoreWriter, logger, prover, metrics, grpcMetrics)
 
 	return &testComponents{
 		encoderServer:    encoderServer,

@@ -99,15 +99,15 @@ func RunDisperserServer(ctx *cli.Context) error {
 	var meterer *mt.Meterer
 	if config.EnablePaymentMeterer {
 		mtConfig := mt.Config{
-			ChainReadTimeout: time.Duration(config.ChainReadTimeout) * time.Second,
-			UpdateInterval:   time.Duration(config.UpdateInterval) * time.Second,
+			ChainReadTimeout: config.ChainReadTimeout,
+			UpdateInterval:   config.OnchainStateRefreshInterval,
 		}
 
 		paymentChainState, err := mt.NewOnchainPaymentState(context.Background(), transactor)
 		if err != nil {
 			return fmt.Errorf("failed to create onchain payment state: %w", err)
 		}
-		if err := paymentChainState.RefreshOnchainPaymentState(context.Background(), nil); err != nil {
+		if err := paymentChainState.RefreshOnchainPaymentState(context.Background()); err != nil {
 			return fmt.Errorf("failed to make initial query to the on-chain state: %w", err)
 		}
 
@@ -124,11 +124,12 @@ func RunDisperserServer(ctx *cli.Context) error {
 		// add some default sensible configs
 		meterer = mt.NewMeterer(
 			mtConfig,
-			&paymentChainState,
+			paymentChainState,
 			offchainStore,
 			logger,
 			// metrics.NewNoopMetrics(),
 		)
+		meterer.Start(context.Background())
 	}
 
 	var ratelimiter common.RateLimiter
@@ -162,26 +163,31 @@ func RunDisperserServer(ctx *cli.Context) error {
 	bucketName := config.BlobstoreConfig.BucketName
 	logger.Info("Blob store", "bucket", bucketName)
 	if config.DisperserVersion == V2 {
-		prover, err := prover.NewProver(&config.EncodingConfig, true)
+		config.EncodingConfig.LoadG2Points = true
+		prover, err := prover.NewProver(&config.EncodingConfig, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create encoder: %w", err)
 		}
 		blobMetadataStore := blobstorev2.NewBlobMetadataStore(dynamoClient, logger, config.BlobstoreConfig.TableName)
 		blobStore := blobstorev2.NewBlobStore(bucketName, s3Client, logger)
 
-		server := apiserver.NewDispersalServerV2(
+		server, err := apiserver.NewDispersalServerV2(
 			config.ServerConfig,
-			config.RateConfig,
 			blobStore,
 			blobMetadataStore,
 			transactor,
-			ratelimiter,
+			meterer,
 			authv2.NewAuthenticator(),
 			prover,
 			uint64(config.MaxNumSymbolsPerBlob),
 			config.OnchainStateRefreshInterval,
 			logger,
+			reg,
+			config.MetricsConfig,
 		)
+		if err != nil {
+			return err
+		}
 		return server.Start(context.Background())
 	}
 

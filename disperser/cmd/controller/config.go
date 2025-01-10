@@ -25,16 +25,19 @@ type Config struct {
 
 	DynamoDBTableName string
 
-	EthClientConfig  geth.EthClientConfig
-	AwsClientConfig  aws.ClientConfig
-	LoggerConfig     common.LoggerConfig
-	IndexerConfig    indexer.Config
-	ChainStateConfig thegraph.Config
-	UseGraph         bool
-	IndexerDataDir   string
+	EthClientConfig                     geth.EthClientConfig
+	AwsClientConfig                     aws.ClientConfig
+	DisperserStoreChunksSigningDisabled bool
+	DisperserKMSKeyID                   string
+	LoggerConfig                        common.LoggerConfig
+	IndexerConfig                       indexer.Config
+	ChainStateConfig                    thegraph.Config
+	UseGraph                            bool
 
 	BLSOperatorStateRetrieverAddr string
 	EigenDAServiceManagerAddr     string
+
+	MetricsPort int
 }
 
 func NewConfig(ctx *cli.Context) (Config, error) {
@@ -59,24 +62,29 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		relays[i] = corev2.RelayKey(relay)
 	}
 	config := Config{
-		DynamoDBTableName: ctx.GlobalString(flags.DynamoDBTableNameFlag.Name),
-		EthClientConfig:   ethClientConfig,
-		AwsClientConfig:   aws.ReadClientConfig(ctx, flags.FlagPrefix),
-		LoggerConfig:      *loggerConfig,
+		DynamoDBTableName:                   ctx.GlobalString(flags.DynamoDBTableNameFlag.Name),
+		EthClientConfig:                     ethClientConfig,
+		AwsClientConfig:                     aws.ReadClientConfig(ctx, flags.FlagPrefix),
+		DisperserStoreChunksSigningDisabled: ctx.GlobalBool(flags.DisperserStoreChunksSigningDisabledFlag.Name),
+		DisperserKMSKeyID:                   ctx.GlobalString(flags.DisperserKMSKeyIDFlag.Name),
+		LoggerConfig:                        *loggerConfig,
 		EncodingManagerConfig: controller.EncodingManagerConfig{
-			PullInterval:           ctx.GlobalDuration(flags.EncodingPullIntervalFlag.Name),
-			EncodingRequestTimeout: ctx.GlobalDuration(flags.EncodingRequestTimeoutFlag.Name),
-			StoreTimeout:           ctx.GlobalDuration(flags.EncodingStoreTimeoutFlag.Name),
-			NumEncodingRetries:     ctx.GlobalInt(flags.NumEncodingRetriesFlag.Name),
-			NumRelayAssignment:     uint16(numRelayAssignments),
-			AvailableRelays:        relays,
-			EncoderAddress:         ctx.GlobalString(flags.EncoderAddressFlag.Name),
+			PullInterval:                ctx.GlobalDuration(flags.EncodingPullIntervalFlag.Name),
+			EncodingRequestTimeout:      ctx.GlobalDuration(flags.EncodingRequestTimeoutFlag.Name),
+			StoreTimeout:                ctx.GlobalDuration(flags.EncodingStoreTimeoutFlag.Name),
+			NumEncodingRetries:          ctx.GlobalInt(flags.NumEncodingRetriesFlag.Name),
+			NumRelayAssignment:          uint16(numRelayAssignments),
+			AvailableRelays:             relays,
+			EncoderAddress:              ctx.GlobalString(flags.EncoderAddressFlag.Name),
+			MaxNumBlobsPerIteration:     int32(ctx.GlobalInt(flags.MaxNumBlobsPerIterationFlag.Name)),
+			OnchainStateRefreshInterval: ctx.GlobalDuration(flags.OnchainStateRefreshIntervalFlag.Name),
 		},
 		DispatcherConfig: controller.DispatcherConfig{
 			PullInterval:           ctx.GlobalDuration(flags.DispatcherPullIntervalFlag.Name),
 			FinalizationBlockDelay: ctx.GlobalUint64(flags.FinalizationBlockDelayFlag.Name),
 			NodeRequestTimeout:     ctx.GlobalDuration(flags.NodeRequestTimeoutFlag.Name),
 			NumRequestRetries:      ctx.GlobalInt(flags.NumRequestRetriesFlag.Name),
+			MaxBatchSize:           int32(ctx.GlobalInt(flags.MaxBatchSizeFlag.Name)),
 		},
 		NumConcurrentEncodingRequests:  ctx.GlobalInt(flags.NumConcurrentEncodingRequestsFlag.Name),
 		NumConcurrentDispersalRequests: ctx.GlobalInt(flags.NumConcurrentDispersalRequestsFlag.Name),
@@ -84,10 +92,13 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		IndexerConfig:                  indexer.ReadIndexerConfig(ctx),
 		ChainStateConfig:               thegraph.ReadCLIConfig(ctx),
 		UseGraph:                       ctx.GlobalBool(flags.UseGraphFlag.Name),
-		IndexerDataDir:                 ctx.GlobalString(flags.IndexerDataDirFlag.Name),
 
 		BLSOperatorStateRetrieverAddr: ctx.GlobalString(flags.BlsOperatorStateRetrieverFlag.Name),
 		EigenDAServiceManagerAddr:     ctx.GlobalString(flags.EigenDAServiceManagerFlag.Name),
+		MetricsPort:                   ctx.GlobalInt(flags.MetricsPortFlag.Name),
+	}
+	if !config.DisperserStoreChunksSigningDisabled && config.DisperserKMSKeyID == "" {
+		return Config{}, fmt.Errorf("DisperserKMSKeyID is required when StoreChunks() signing is enabled")
 	}
 	return config, nil
 }

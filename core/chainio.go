@@ -72,6 +72,9 @@ type Reader interface {
 	// GetOperatorSetParams returns operator set params for the quorum.
 	GetOperatorSetParams(ctx context.Context, quorumID QuorumID) (*OperatorSetParam, error)
 
+	// GetOperatorSocket returns a operator's socket.
+	GetOperatorSocket(ctx context.Context, operatorID OperatorID) (string, error)
+
 	// GetNumberOfRegisteredOperatorForQuorum returns the number of registered operators for the quorum.
 	GetNumberOfRegisteredOperatorForQuorum(ctx context.Context, quorumID QuorumID) (uint32, error)
 
@@ -100,17 +103,38 @@ type Reader interface {
 	// GetRequiredQuorumNumbers returns set of required quorum numbers
 	GetRequiredQuorumNumbers(ctx context.Context, blockNumber uint32) ([]QuorumID, error)
 
-	// GetActiveReservations returns active reservations (end timestamp > current timestamp)
-	GetActiveReservations(ctx context.Context, blockNumber uint32, accountIDs []string) (map[string]ActiveReservation, error)
+	// GetNumBlobVersions returns the number of blob versions.
+	GetNumBlobVersions(ctx context.Context) (uint16, error)
 
-	// GetActiveReservationByAccount returns active reservation by account ID
-	GetActiveReservationByAccount(ctx context.Context, blockNumber uint32, accountID string) (ActiveReservation, error)
+	// GetVersionedBlobParams returns the blob version parameters for the given block number and blob version.
+	GetVersionedBlobParams(ctx context.Context, blobVersion uint16) (*BlobVersionParameters, error)
+
+	// GetAllVersionedBlobParams returns the blob version parameters for all blob versions at the given block number.
+	GetAllVersionedBlobParams(ctx context.Context) (map[uint16]*BlobVersionParameters, error)
+
+	// GetReservedPayments returns active reservations (end timestamp > current timestamp)
+	GetReservedPayments(ctx context.Context, accountIDs []gethcommon.Address) (map[gethcommon.Address]*ReservedPayment, error)
+
+	// GetReservedPaymentByAccount returns active reservation by account ID
+	GetReservedPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*ReservedPayment, error)
 
 	// GetOnDemandPayments returns all on-demand payments
-	GetOnDemandPayments(ctx context.Context, blockNumber uint32, accountIDs []string) (map[string]OnDemandPayment, error)
+	GetOnDemandPayments(ctx context.Context, accountIDs []gethcommon.Address) (map[gethcommon.Address]*OnDemandPayment, error)
 
 	// GetOnDemandPaymentByAccount returns on-demand payment of an account
-	GetOnDemandPaymentByAccount(ctx context.Context, blockNumber uint32, accountID string) (OnDemandPayment, error)
+	GetOnDemandPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*OnDemandPayment, error)
+
+	// GetNumRelays returns the number of registered relays.
+	GetNumRelays(ctx context.Context) (uint32, error)
+
+	// GetRelayURL returns the relay URL address for the given key.
+	GetRelayURL(ctx context.Context, key uint32) (string, error)
+
+	// GetRelayURLs returns the relay URL addresses for all relays.
+	GetRelayURLs(ctx context.Context) (map[uint32]string, error)
+
+	// GetDisperserAddress returns the disperser address with the given ID.
+	GetDisperserAddress(ctx context.Context, disperserID uint32) (gethcommon.Address, error)
 }
 
 type Writer interface {

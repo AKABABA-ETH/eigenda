@@ -4,8 +4,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
-	"math/big"
 	"strings"
 
 	commonpb "github.com/Layr-Labs/eigenda/api/grpc/common/v2"
@@ -16,15 +14,7 @@ import (
 	gethcommon "github.com/ethereum/go-ethereum/common"
 )
 
-var (
-	// TODO(mooselumph): Put these parameters on chain and add on-chain checks to ensure that the number of operators does not
-	// conflict with the existing on-chain limits
-	ParametersMap = map[BlobVersion]BlobVersionParameters{
-		0: {CodingRate: 8, ReconstructionThreshold: 0.22, NumChunks: 8192},
-	}
-)
-
-type BlobVersion uint8
+type BlobVersion = uint16
 
 // Assignment contains information about the set of chunks that a specific node will receive
 type Assignment struct {
@@ -118,10 +108,9 @@ func BlobHeaderFromProtobuf(proto *commonpb.BlobHeader) (*BlobHeader, error) {
 		quorumNumbers[i] = core.QuorumID(q)
 	}
 
-	paymentMetadata := core.PaymentMetadata{
-		AccountID:         proto.GetPaymentHeader().GetAccountId(),
-		BinIndex:          proto.GetPaymentHeader().GetBinIndex(),
-		CumulativePayment: new(big.Int).SetBytes(proto.GetPaymentHeader().GetCumulativePayment()),
+	paymentMetadata := core.ConvertToPaymentMetadata(proto.GetPaymentHeader())
+	if paymentMetadata == nil {
+		return nil, errors.New("payment metadata is nil")
 	}
 
 	return &BlobHeader{
@@ -133,7 +122,7 @@ func BlobHeaderFromProtobuf(proto *commonpb.BlobHeader) (*BlobHeader, error) {
 			Length:           uint(proto.GetCommitment().GetLength()),
 		},
 		QuorumNumbers:   quorumNumbers,
-		PaymentMetadata: paymentMetadata,
+		PaymentMetadata: *paymentMetadata,
 		Signature:       proto.GetSignature(),
 	}, nil
 }
@@ -158,21 +147,19 @@ func (b *BlobHeader) ToProtobuf() (*commonpb.BlobHeader, error) {
 	}, nil
 }
 
-func (b *BlobHeader) GetEncodingParams() (encoding.EncodingParams, error) {
-	params := ParametersMap[b.BlobVersion]
-
-	length, err := GetChunkLength(b.BlobVersion, uint32(b.BlobCommitments.Length))
+func (b *BlobHeader) GetEncodingParams(blobParams *core.BlobVersionParameters) (encoding.EncodingParams, error) {
+	length, err := GetChunkLength(uint32(b.BlobCommitments.Length), blobParams)
 	if err != nil {
 		return encoding.EncodingParams{}, err
 	}
 
 	return encoding.EncodingParams{
-		NumChunks:   uint64(params.NumChunks),
+		NumChunks:   uint64(blobParams.NumChunks),
 		ChunkLength: uint64(length),
 	}, nil
 }
 
-type RelayKey uint16
+type RelayKey = uint32
 
 type BlobCertificate struct {
 	BlobHeader *BlobHeader
@@ -328,9 +315,11 @@ type Attestation struct {
 	Sigma *core.Signature
 	// QuorumNumbers contains the quorums relevant for the attestation
 	QuorumNumbers []core.QuorumID
+	// QuorumResults contains the results of the quorum verification
+	QuorumResults map[core.QuorumID]uint8
 }
 
-func (a *Attestation) ToProtobuf() *disperserpb.Attestation {
+func (a *Attestation) ToProtobuf() (*disperserpb.Attestation, error) {
 	nonSignerPubKeys := make([][]byte, len(a.NonSignerPubKeys))
 	for i, p := range a.NonSignerPubKeys {
 		pubkeyBytes := p.Bytes()
@@ -338,26 +327,31 @@ func (a *Attestation) ToProtobuf() *disperserpb.Attestation {
 	}
 
 	quorumAPKs := make([][]byte, len(a.QuorumAPKs))
-	for i, p := range a.QuorumAPKs {
-		apkBytes := p.Bytes()
-		quorumAPKs[i] = apkBytes[:]
-	}
-
 	quorumNumbers := make([]uint32, len(a.QuorumNumbers))
+	quorumResults := make([]uint8, len(a.QuorumResults))
 	for i, q := range a.QuorumNumbers {
 		quorumNumbers[i] = uint32(q)
+
+		apk, ok := a.QuorumAPKs[q]
+		if !ok {
+			return nil, fmt.Errorf("missing quorum APK for quorum %d", q)
+		}
+		apkBytes := apk.Bytes()
+		quorumAPKs[i] = apkBytes[:]
+		quorumResults[i] = a.QuorumResults[q]
 	}
 
 	apkG2Bytes := a.APKG2.Bytes()
 	sigmaBytes := a.Sigma.Bytes()
 
 	return &disperserpb.Attestation{
-		NonSignerPubkeys: nonSignerPubKeys,
-		ApkG2:            apkG2Bytes[:],
-		QuorumApks:       quorumAPKs,
-		Sigma:            sigmaBytes[:],
-		QuorumNumbers:    quorumNumbers,
-	}
+		NonSignerPubkeys:        nonSignerPubKeys,
+		ApkG2:                   apkG2Bytes[:],
+		QuorumApks:              quorumAPKs,
+		Sigma:                   sigmaBytes[:],
+		QuorumNumbers:           quorumNumbers,
+		QuorumSignedPercentages: quorumResults,
+	}, nil
 }
 
 type BlobVerificationInfo struct {
@@ -378,16 +372,6 @@ func (v *BlobVerificationInfo) ToProtobuf(blobCert *BlobCertificate) (*disperser
 		BlobIndex:       v.BlobIndex,
 		InclusionProof:  v.InclusionProof,
 	}, nil
-}
-
-type BlobVersionParameters struct {
-	CodingRate              uint32
-	ReconstructionThreshold float64
-	NumChunks               uint32
-}
-
-func (p BlobVersionParameters) MaxNumOperators() uint32 {
-	return uint32(math.Floor(float64(p.NumChunks) * (1 - 1/(p.ReconstructionThreshold*float64(p.CodingRate)))))
 }
 
 // DispersalRequest is a request to disperse a batch to a specific operator

@@ -29,7 +29,7 @@ func (s BlobStatus) String() string {
 	case Failed:
 		return "Failed"
 	case InsufficientSignatures:
-		return "InsufficientSignatures"
+		return "Insufficient Signatures"
 	default:
 		return "Unknown"
 	}

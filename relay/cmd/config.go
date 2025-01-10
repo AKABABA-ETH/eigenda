@@ -5,28 +5,16 @@ import (
 
 	"github.com/Layr-Labs/eigenda/common"
 	"github.com/Layr-Labs/eigenda/common/aws"
+	"github.com/Layr-Labs/eigenda/common/geth"
+	"github.com/Layr-Labs/eigenda/core/thegraph"
 	core "github.com/Layr-Labs/eigenda/core/v2"
 	"github.com/Layr-Labs/eigenda/relay"
 	"github.com/Layr-Labs/eigenda/relay/cmd/flags"
+	"github.com/Layr-Labs/eigenda/relay/limiter"
 	"github.com/urfave/cli"
 )
 
 // Config is the configuration for the relay Server.
-//
-// Environment variables are mapped into this struct by taking the name of the field in this struct,
-// converting to upper case, and prepending "RELAY_". For example, "BlobCacheSize" can be set using the
-// environment variable "RELAY_BLOBCACHESIZE".
-//
-// For nested structs, add the name of the struct variable before the field name, separated by an underscore.
-// For example, "Log.Format" can be set using the environment variable "RELAY_LOG_FORMAT".
-//
-// Slice values can be set using a comma-separated list. For example, "RelayIDs" can be set using the environment
-// variable "RELAY_RELAYIDS='1,2,3,4'".
-//
-// It is also possible to set the configuration using a configuration file. The path to the configuration file should
-// be passed as the first argument to the relay binary, e.g. "bin/relay config.yaml". The structure of the config
-// file should mirror the structure of this struct, with keys in the config file matching the field names
-// of this struct.
 type Config struct {
 
 	// Log is the configuration for the logger. Default is common.DefaultLoggerConfig().
@@ -43,6 +31,12 @@ type Config struct {
 
 	// RelayConfig is the configuration for the relay.
 	RelayConfig relay.Config
+
+	// Configuration for the graph indexer.
+	EthClientConfig               geth.EthClientConfig
+	BLSOperatorStateRetrieverAddr string
+	EigenDAServiceManagerAddr     string
+	ChainStateConfig              thegraph.Config
 }
 
 func NewConfig(ctx *cli.Context) (Config, error) {
@@ -61,16 +55,51 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		BucketName:        ctx.String(flags.BucketNameFlag.Name),
 		MetadataTableName: ctx.String(flags.MetadataTableNameFlag.Name),
 		RelayConfig: relay.Config{
-			RelayIDs:               make([]core.RelayKey, len(relayIDs)),
-			GRPCPort:               ctx.Int(flags.GRPCPortFlag.Name),
-			MaxGRPCMessageSize:     ctx.Int(flags.MaxGRPCMessageSizeFlag.Name),
-			MetadataCacheSize:      ctx.Int(flags.MetadataCacheSizeFlag.Name),
-			MetadataMaxConcurrency: ctx.Int(flags.MetadataMaxConcurrencyFlag.Name),
-			BlobCacheSize:          ctx.Int(flags.BlobCacheSizeFlag.Name),
-			BlobMaxConcurrency:     ctx.Int(flags.BlobMaxConcurrencyFlag.Name),
-			ChunkCacheSize:         ctx.Int(flags.ChunkCacheSizeFlag.Name),
-			ChunkMaxConcurrency:    ctx.Int(flags.ChunkMaxConcurrencyFlag.Name),
+			RelayIDs:                   make([]core.RelayKey, len(relayIDs)),
+			GRPCPort:                   ctx.Int(flags.GRPCPortFlag.Name),
+			MaxGRPCMessageSize:         ctx.Int(flags.MaxGRPCMessageSizeFlag.Name),
+			MetadataCacheSize:          ctx.Int(flags.MetadataCacheSizeFlag.Name),
+			MetadataMaxConcurrency:     ctx.Int(flags.MetadataMaxConcurrencyFlag.Name),
+			BlobCacheBytes:             ctx.Uint64(flags.BlobCacheBytes.Name),
+			BlobMaxConcurrency:         ctx.Int(flags.BlobMaxConcurrencyFlag.Name),
+			ChunkCacheSize:             ctx.Uint64(flags.ChunkCacheSizeFlag.Name),
+			ChunkMaxConcurrency:        ctx.Int(flags.ChunkMaxConcurrencyFlag.Name),
+			MaxKeysPerGetChunksRequest: ctx.Int(flags.MaxKeysPerGetChunksRequestFlag.Name),
+			RateLimits: limiter.Config{
+				MaxGetBlobOpsPerSecond:          ctx.Float64(flags.MaxGetBlobOpsPerSecondFlag.Name),
+				GetBlobOpsBurstiness:            ctx.Int(flags.GetBlobOpsBurstinessFlag.Name),
+				MaxGetBlobBytesPerSecond:        ctx.Float64(flags.MaxGetBlobBytesPerSecondFlag.Name),
+				GetBlobBytesBurstiness:          ctx.Int(flags.GetBlobBytesBurstinessFlag.Name),
+				MaxConcurrentGetBlobOps:         ctx.Int(flags.MaxConcurrentGetBlobOpsFlag.Name),
+				MaxGetChunkOpsPerSecond:         ctx.Float64(flags.MaxGetChunkOpsPerSecondFlag.Name),
+				GetChunkOpsBurstiness:           ctx.Int(flags.GetChunkOpsBurstinessFlag.Name),
+				MaxGetChunkBytesPerSecond:       ctx.Float64(flags.MaxGetChunkBytesPerSecondFlag.Name),
+				GetChunkBytesBurstiness:         ctx.Int(flags.GetChunkBytesBurstinessFlag.Name),
+				MaxConcurrentGetChunkOps:        ctx.Int(flags.MaxConcurrentGetChunkOpsFlag.Name),
+				MaxGetChunkOpsPerSecondClient:   ctx.Float64(flags.MaxGetChunkOpsPerSecondClientFlag.Name),
+				GetChunkOpsBurstinessClient:     ctx.Int(flags.GetChunkOpsBurstinessClientFlag.Name),
+				MaxGetChunkBytesPerSecondClient: ctx.Float64(flags.MaxGetChunkBytesPerSecondClientFlag.Name),
+				GetChunkBytesBurstinessClient:   ctx.Int(flags.GetChunkBytesBurstinessClientFlag.Name),
+				MaxConcurrentGetChunkOpsClient:  ctx.Int(flags.MaxConcurrentGetChunkOpsClientFlag.Name),
+			},
+			AuthenticationKeyCacheSize:  ctx.Int(flags.AuthenticationKeyCacheSizeFlag.Name),
+			AuthenticationTimeout:       ctx.Duration(flags.AuthenticationTimeoutFlag.Name),
+			AuthenticationDisabled:      ctx.Bool(flags.AuthenticationDisabledFlag.Name),
+			OnchainStateRefreshInterval: ctx.Duration(flags.OnchainStateRefreshIntervalFlag.Name),
+			Timeouts: relay.TimeoutConfig{
+				GetChunksTimeout:               ctx.Duration(flags.GetChunksTimeoutFlag.Name),
+				GetBlobTimeout:                 ctx.Duration(flags.GetBlobTimeoutFlag.Name),
+				InternalGetMetadataTimeout:     ctx.Duration(flags.InternalGetMetadataTimeoutFlag.Name),
+				InternalGetBlobTimeout:         ctx.Duration(flags.InternalGetBlobTimeoutFlag.Name),
+				InternalGetProofsTimeout:       ctx.Duration(flags.InternalGetProofsTimeoutFlag.Name),
+				InternalGetCoefficientsTimeout: ctx.Duration(flags.InternalGetCoefficientsTimeoutFlag.Name),
+			},
+			MetricsPort: ctx.Int(flags.MetricsPortFlag.Name),
 		},
+		EthClientConfig:               geth.ReadEthClientConfigRPCOnly(ctx),
+		BLSOperatorStateRetrieverAddr: ctx.String(flags.BlsOperatorStateRetrieverAddrFlag.Name),
+		EigenDAServiceManagerAddr:     ctx.String(flags.EigenDAServiceManagerAddrFlag.Name),
+		ChainStateConfig:              thegraph.ReadCLIConfig(ctx),
 	}
 	for i, id := range relayIDs {
 		config.RelayConfig.RelayIDs[i] = core.RelayKey(id)

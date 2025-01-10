@@ -28,7 +28,7 @@ type Config struct {
 	EncoderConfig    kzg.KzgConfig
 	LoggerConfig     common.LoggerConfig
 	ServerConfig     *encoder.ServerConfig
-	MetricsConfig    encoder.MetrisConfig
+	MetricsConfig    *encoder.MetricsConfig
 }
 
 func NewConfig(ctx *cli.Context) (Config, error) {
@@ -56,10 +56,15 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 			GrpcPort:                 ctx.GlobalString(flags.GrpcPortFlag.Name),
 			MaxConcurrentRequests:    ctx.GlobalInt(flags.MaxConcurrentRequestsFlag.Name),
 			RequestPoolSize:          ctx.GlobalInt(flags.RequestPoolSizeFlag.Name),
+			RequestQueueSize:         ctx.GlobalInt(flags.RequestQueueSizeFlag.Name),
 			EnableGnarkChunkEncoding: ctx.Bool(flags.EnableGnarkChunkEncodingFlag.Name),
 			PreventReencoding:        ctx.Bool(flags.PreventReencodingFlag.Name),
+			Backend:                  ctx.String(flags.BackendFlag.Name),
+			GPUEnable:                ctx.Bool(flags.GPUEnableFlag.Name),
+			PprofHttpPort:            ctx.GlobalString(flags.PprofHttpPort.Name),
+			EnablePprof:              ctx.GlobalBool(flags.EnablePprof.Name),
 		},
-		MetricsConfig: encoder.MetrisConfig{
+		MetricsConfig: &encoder.MetricsConfig{
 			HTTPPort:      ctx.GlobalString(flags.MetricsHTTPPort.Name),
 			EnableMetrics: ctx.GlobalBool(flags.EnableMetrics.Name),
 		},

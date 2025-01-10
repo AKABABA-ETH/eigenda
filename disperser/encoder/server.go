@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/Layr-Labs/eigenda/common/healthcheck"
+	commonpprof "github.com/Layr-Labs/eigenda/common/pprof"
 	"github.com/Layr-Labs/eigenda/disperser"
 	pb "github.com/Layr-Labs/eigenda/disperser/api/grpc/encoder"
+	"github.com/Layr-Labs/eigenda/disperser/common"
 	"github.com/Layr-Labs/eigenda/encoding"
 	"github.com/Layr-Labs/eigensdk-go/logging"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -20,29 +24,48 @@ import (
 type EncoderServer struct {
 	pb.UnimplementedEncoderServer
 
-	config  ServerConfig
-	logger  logging.Logger
-	prover  encoding.Prover
-	metrics *Metrics
-	close   func()
+	config      ServerConfig
+	logger      logging.Logger
+	prover      encoding.Prover
+	metrics     *Metrics
+	grpcMetrics *grpcprom.ServerMetrics
+	close       func()
 
 	runningRequests chan struct{}
-	requestPool     chan struct{}
+	requestPool     chan blobRequest
+
+	queueStats map[string]int
+	queueLock  sync.Mutex
 }
 
-func NewEncoderServer(config ServerConfig, logger logging.Logger, prover encoding.Prover, metrics *Metrics) *EncoderServer {
+type blobRequest struct {
+	blobSizeByte int
+}
+
+func NewEncoderServer(config ServerConfig, logger logging.Logger, prover encoding.Prover, metrics *Metrics, grpcMetrics *grpcprom.ServerMetrics) *EncoderServer {
+	// Set initial queue capacity metric
+	metrics.SetQueueCapacity(config.RequestPoolSize)
+
 	return &EncoderServer{
-		config:  config,
-		logger:  logger.With("component", "EncoderServer"),
-		prover:  prover,
-		metrics: metrics,
+		config:      config,
+		logger:      logger.With("component", "EncoderServer"),
+		prover:      prover,
+		metrics:     metrics,
+		grpcMetrics: grpcMetrics,
 
 		runningRequests: make(chan struct{}, config.MaxConcurrentRequests),
-		requestPool:     make(chan struct{}, config.RequestPoolSize),
+		requestPool:     make(chan blobRequest, config.RequestPoolSize),
+		queueStats:      make(map[string]int),
 	}
 }
 
 func (s *EncoderServer) Start() error {
+	pprofProfiler := commonpprof.NewPprofProfiler(s.config.PprofHttpPort, s.logger)
+	if s.config.EnablePprof {
+		go pprofProfiler.Start()
+		s.logger.Info("Enabled pprof for encoder server", "port", s.config.PprofHttpPort)
+	}
+
 	// Serve grpc requests
 	addr := fmt.Sprintf("%s:%s", disperser.Localhost, s.config.GrpcPort)
 	listener, err := net.Listen("tcp", addr)
@@ -51,9 +74,14 @@ func (s *EncoderServer) Start() error {
 	}
 
 	opt := grpc.MaxRecvMsgSize(1024 * 1024 * 300) // 300 MiB
-	gs := grpc.NewServer(opt)
+	gs := grpc.NewServer(opt,
+		grpc.UnaryInterceptor(
+			s.grpcMetrics.UnaryServerInterceptor(),
+		),
+	)
 	reflection.Register(gs)
 	pb.RegisterEncoderServer(gs, s)
+	s.grpcMetrics.InitializeMetrics(gs)
 
 	// Register Server for Health Checks
 	name := pb.Encoder_ServiceDesc.ServiceName
@@ -71,36 +99,37 @@ func (s *EncoderServer) Start() error {
 	return gs.Serve(listener)
 }
 
-func (s *EncoderServer) Close() {
-	if s.close == nil {
-		return
-	}
-	s.close()
-}
-
 func (s *EncoderServer) EncodeBlob(ctx context.Context, req *pb.EncodeBlobRequest) (*pb.EncodeBlobReply, error) {
 	startTime := time.Now()
+	blobSize := len(req.GetData())
+	sizeBucket := common.BlobSizeBucket(blobSize)
+
 	select {
-	case s.requestPool <- struct{}{}:
+	case s.requestPool <- blobRequest{blobSizeByte: blobSize}:
+		s.queueLock.Lock()
+		s.queueStats[sizeBucket]++
+		s.metrics.ObserveQueue(s.queueStats)
+		s.queueLock.Unlock()
 	default:
-		s.metrics.IncrementRateLimitedBlobRequestNum(len(req.GetData()))
+		s.metrics.IncrementRateLimitedBlobRequestNum(blobSize)
 		s.logger.Warn("rate limiting as request pool is full", "requestPoolSize", s.config.RequestPoolSize, "maxConcurrentRequests", s.config.MaxConcurrentRequests)
 		return nil, errors.New("too many requests")
 	}
+
 	s.runningRequests <- struct{}{}
 	defer s.popRequest()
 
 	if ctx.Err() != nil {
-		s.metrics.IncrementCanceledBlobRequestNum(len(req.GetData()))
+		s.metrics.IncrementCanceledBlobRequestNum(blobSize)
 		return nil, ctx.Err()
 	}
 
 	s.metrics.ObserveLatency("queuing", time.Since(startTime))
 	reply, err := s.handleEncoding(ctx, req)
 	if err != nil {
-		s.metrics.IncrementFailedBlobRequestNum(len(req.GetData()))
+		s.metrics.IncrementFailedBlobRequestNum(blobSize)
 	} else {
-		s.metrics.IncrementSuccessfulBlobRequestNum(len(req.GetData()))
+		s.metrics.IncrementSuccessfulBlobRequestNum(blobSize)
 	}
 	s.metrics.ObserveLatency("total", time.Since(startTime))
 
@@ -108,8 +137,12 @@ func (s *EncoderServer) EncodeBlob(ctx context.Context, req *pb.EncodeBlobReques
 }
 
 func (s *EncoderServer) popRequest() {
-	<-s.requestPool
+	blobRequest := <-s.requestPool
 	<-s.runningRequests
+	s.queueLock.Lock()
+	s.queueStats[common.BlobSizeBucket(blobRequest.blobSizeByte)]--
+	s.metrics.ObserveQueue(s.queueStats)
+	s.queueLock.Unlock()
 }
 
 func (s *EncoderServer) handleEncoding(ctx context.Context, req *pb.EncodeBlobRequest) (*pb.EncodeBlobReply, error) {
@@ -153,7 +186,6 @@ func (s *EncoderServer) handleEncoding(ctx context.Context, req *pb.EncodeBlobRe
 	}
 
 	var chunksData [][]byte
-
 	var format pb.ChunkEncodingFormat
 	if s.config.EnableGnarkChunkEncoding {
 		format = pb.ChunkEncodingFormat_GNARK
@@ -187,4 +219,11 @@ func (s *EncoderServer) handleEncoding(ctx context.Context, req *pb.EncodeBlobRe
 		Chunks:              chunksData,
 		ChunkEncodingFormat: format,
 	}, nil
+}
+
+func (s *EncoderServer) Close() {
+	if s.close == nil {
+		return
+	}
+	s.close()
 }

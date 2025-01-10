@@ -2,6 +2,7 @@ package node_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Layr-Labs/eigenda/common/kvstore"
 	"github.com/Layr-Labs/eigenda/common/kvstore/tablestore"
@@ -41,9 +42,9 @@ func TestStoreBatchV2(t *testing.T) {
 	defer func() {
 		_ = db.Shutdown()
 	}()
-	keys, err := s.StoreBatch(batch, rawBundles)
+	keys, _, err := s.StoreBatch(batch, rawBundles)
 	require.NoError(t, err)
-	require.Len(t, keys, 10)
+	require.Len(t, keys, 7)
 
 	tables := db.GetTables()
 	require.ElementsMatch(t, []string{node.BatchHeaderTableName, node.BlobCertificateTableName, node.BundleTableName}, tables)
@@ -59,21 +60,6 @@ func TestStoreBatchV2(t *testing.T) {
 	deserializedBatchHeader, err := corev2.DeserializeBatchHeader(bhhBytes)
 	require.NoError(t, err)
 	assert.Equal(t, batch.BatchHeader, deserializedBatchHeader)
-
-	// Check blob certificates
-	blobCertKeyBuilder, err := db.GetKeyBuilder(node.BlobCertificateTableName)
-	require.NoError(t, err)
-	for _, cert := range batch.BlobCertificates {
-		blobKey, err := cert.BlobHeader.BlobKey()
-		require.NoError(t, err)
-		blobCertKey := blobCertKeyBuilder.Key(blobKey[:])
-		blobCertBytes, err := db.Get(blobCertKey)
-		require.NoError(t, err)
-		assert.NotNil(t, blobCertBytes)
-		deserializedBlobCert, err := corev2.DeserializeBlobCertificate(blobCertBytes)
-		require.NoError(t, err)
-		assert.Equal(t, cert, deserializedBlobCert)
-	}
 
 	// Check bundles
 	bundleKeyBuilder, err := db.GetKeyBuilder(node.BundleTableName)
@@ -92,7 +78,7 @@ func TestStoreBatchV2(t *testing.T) {
 	}
 
 	// Try to store the same batch again
-	_, err = s.StoreBatch(batch, rawBundles)
+	_, _, err = s.StoreBatch(batch, rawBundles)
 	require.ErrorIs(t, err, node.ErrBatchAlreadyExist)
 
 	// Check deletion
@@ -102,14 +88,6 @@ func TestStoreBatchV2(t *testing.T) {
 	bhhBytes, err = db.Get(batchHeaderKeyBuilder.Key(bhh[:]))
 	require.Error(t, err)
 	require.Empty(t, bhhBytes)
-	for _, cert := range batch.BlobCertificates {
-		blobKey, err := cert.BlobHeader.BlobKey()
-		require.NoError(t, err)
-		blobCertKey := blobCertKeyBuilder.Key(blobKey[:])
-		blobCertBytes, err := db.Get(blobCertKey)
-		require.Error(t, err)
-		require.Empty(t, blobCertBytes)
-	}
 
 	for _, bundles := range rawBundles {
 		blobKey, err := bundles.BlobCertificate.BlobHeader.BlobKey()
@@ -151,7 +129,7 @@ func TestGetChunks(t *testing.T) {
 	defer func() {
 		_ = db.Shutdown()
 	}()
-	_, err := s.StoreBatch(batch, rawBundles)
+	_, _, err := s.StoreBatch(batch, rawBundles)
 	require.NoError(t, err)
 
 	chunks, err := s.GetChunks(blobKeys[0], 0)
@@ -189,6 +167,6 @@ func createStoreV2(t *testing.T) (node.StoreV2, kvstore.TableStore) {
 	config.Schema = []string{node.BatchHeaderTableName, node.BlobCertificateTableName, node.BundleTableName}
 	tStore, err := tablestore.Start(logger, config)
 	require.NoError(t, err)
-	s := node.NewLevelDBStoreV2(tStore, logger)
+	s := node.NewLevelDBStoreV2(tStore, logger, 10*time.Second)
 	return s, tStore
 }

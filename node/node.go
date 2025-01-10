@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"math/big"
 	"net/http"
@@ -14,8 +15,11 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Layr-Labs/eigenda/common/kvstore/tablestore"
+	"github.com/Layr-Labs/eigenda/common/pprof"
 	"github.com/Layr-Labs/eigenda/common/pubip"
 	"github.com/Layr-Labs/eigenda/encoding/kzg/verifier"
 
@@ -28,16 +32,16 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/Layr-Labs/eigenda/api/clients"
+	"github.com/Layr-Labs/eigenda/api/clients/v2"
 	"github.com/Layr-Labs/eigenda/api/grpc/node"
 	"github.com/Layr-Labs/eigenda/common/geth"
 	"github.com/Layr-Labs/eigenda/core"
 	"github.com/Layr-Labs/eigenda/core/eth"
 	"github.com/Layr-Labs/eigenda/core/indexer"
 	corev2 "github.com/Layr-Labs/eigenda/core/v2"
+	v2 "github.com/Layr-Labs/eigenda/core/v2"
 	"github.com/Layr-Labs/eigensdk-go/logging"
 	"github.com/Layr-Labs/eigensdk-go/metrics"
-	rpccalls "github.com/Layr-Labs/eigensdk-go/metrics/collectors/rpc_calls"
 	"github.com/Layr-Labs/eigensdk-go/nodeapi"
 	"github.com/gammazero/workerpool"
 
@@ -74,10 +78,14 @@ type Node struct {
 	ChainID                 *big.Int
 	BLSSigner               blssignerV1.SignerClient
 
-	RelayClient clients.RelayClient
+	RelayClient atomic.Value
 
 	mu            sync.Mutex
 	CurrentSocket string
+
+	// BlobVersionParams is a map of blob version parameters loaded from the chain.
+	// It is used to determine blob parameters based on the version number.
+	BlobVersionParams atomic.Pointer[corev2.BlobVersionParameterMap]
 }
 
 // NewNode creates a new Node with the provided config.
@@ -85,6 +93,7 @@ func NewNode(
 	reg *prometheus.Registry,
 	config *Config,
 	pubIPProvider pubip.Provider,
+	client *geth.InstrumentedEthClient,
 	logger logging.Logger,
 ) (*Node, error) {
 	// Setup metrics
@@ -95,18 +104,12 @@ func NewNode(
 
 	nodeLogger := logger.With("component", "Node")
 
-	eigenMetrics := metrics.NewEigenMetrics(AppName, ":"+config.MetricsPort, reg, logger.With("component", "EigenMetrics"))
-	rpcCallsCollector := rpccalls.NewCollector(AppName, reg)
+	eigenMetrics := metrics.NewEigenMetrics(AppName, fmt.Sprintf(":%d", config.MetricsPort), reg, logger.With("component", "EigenMetrics"))
 
 	// Make sure config folder exists.
 	err := os.MkdirAll(config.DbPath, os.ModePerm)
 	if err != nil {
 		return nil, fmt.Errorf("could not create db directory at %s: %w", config.DbPath, err)
-	}
-
-	client, err := geth.NewInstrumentedEthClient(config.EthClientConfig, rpcCallsCollector, logger)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create chain.Client: %w", err)
 	}
 
 	chainID, err := client.ChainID(context.Background())
@@ -167,16 +170,17 @@ func NewNode(
 	// Setup Node Api
 	nodeApi := nodeapi.NewNodeApi(AppName, SemVer, ":"+config.NodeApiPort, logger.With("component", "NodeApi"))
 
-	metrics := NewMetrics(eigenMetrics, reg, logger, ":"+config.MetricsPort, config.ID, config.OnchainMetricsInterval, tx, cst)
+	metrics := NewMetrics(eigenMetrics, reg, logger, fmt.Sprintf(":%d", config.MetricsPort), config.ID, config.OnchainMetricsInterval, tx, cst)
 
 	// Make validator
-	v, err := verifier.NewVerifier(&config.EncoderConfig, false)
+	config.EncoderConfig.LoadG2Points = false
+	v, err := verifier.NewVerifier(&config.EncoderConfig, nil)
 	if err != nil {
 		return nil, err
 	}
 	asgn := &core.StdAssignmentCoordinator{}
 	validator := core.NewShardValidator(v, asgn, cst, config.ID)
-	validatorV2 := corev2.NewShardValidator(v, config.ID)
+	validatorV2 := corev2.NewShardValidator(v, config.ID, logger)
 
 	// Resolve the BLOCK_STALE_MEASURE and STORE_DURATION_BLOCKS.
 	var blockStaleMeasure, storeDurationBlocks uint32
@@ -215,16 +219,13 @@ func NewNode(
 		"quorumIDs", fmt.Sprint(config.QuorumIDList), "registerNodeAtStart", config.RegisterNodeAtStart, "pubIPCheckInterval", config.PubIPCheckInterval,
 		"eigenDAServiceManagerAddr", config.EigenDAServiceManagerAddr, "blockStaleMeasure", blockStaleMeasure, "storeDurationBlocks", storeDurationBlocks, "enableGnarkBundleEncoding", config.EnableGnarkBundleEncoding)
 
-	var relayClient clients.RelayClient
-	// Create a new relay client with relay addresses onchain
-	return &Node{
+	n := &Node{
 		Config:                  config,
 		Logger:                  nodeLogger,
 		KeyPair:                 keyPair,
 		Metrics:                 metrics,
 		NodeApi:                 nodeApi,
 		Store:                   store,
-		StoreV2:                 nil,
 		ChainState:              cst,
 		Transactor:              tx,
 		Validator:               validator,
@@ -232,14 +233,71 @@ func NewNode(
 		PubIPProvider:           pubIPProvider,
 		OperatorSocketsFilterer: socketsFilterer,
 		ChainID:                 chainID,
-		RelayClient:             relayClient,
 		BLSSigner:               blsClient,
-	}, nil
+	}
+
+	if !config.EnableV2 {
+		return n, nil
+	}
+
+	var storeV2 StoreV2
+	var blobVersionParams *corev2.BlobVersionParameterMap
+	if config.EnableV2 {
+		v2Path := config.DbPath + "/chunk_v2"
+		dbV2, err := tablestore.Start(logger, &tablestore.Config{
+			Type:                       tablestore.LevelDB,
+			Path:                       &v2Path,
+			GarbageCollectionEnabled:   true,
+			GarbageCollectionInterval:  time.Duration(config.ExpirationPollIntervalSec) * time.Second,
+			GarbageCollectionBatchSize: 1024,
+			Schema:                     []string{BatchHeaderTableName, BlobCertificateTableName, BundleTableName},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create new tablestore: %w", err)
+		}
+		timeToExpire := (blockStaleMeasure + storeDurationBlocks) * 12 // 12s per block
+		storeV2 = NewLevelDBStoreV2(dbV2, logger, time.Duration(timeToExpire)*time.Second)
+
+		blobParams, err := tx.GetAllVersionedBlobParams(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get versioned blob parameters: %w", err)
+		}
+		blobVersionParams = corev2.NewBlobVersionParameterMap(blobParams)
+
+		var relayClient clients.RelayClient
+		relayURLs, err := tx.GetRelayURLs(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to get relay URLs: %w", err)
+		}
+
+		logger.Info("Creating relay client", "relayURLs", relayURLs)
+		relayClient, err = clients.NewRelayClient(&clients.RelayClientConfig{
+			Sockets:           relayURLs,
+			UseSecureGrpcFlag: config.UseSecureGrpc,
+			OperatorID:        &config.ID,
+			MessageSigner:     n.SignMessage,
+		}, logger)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to create new relay client: %w", err)
+		}
+
+		n.RelayClient.Store(relayClient)
+	}
+
+	n.StoreV2 = storeV2
+	n.BlobVersionParams.Store(blobVersionParams)
+	return n, nil
 }
 
 // Start starts the Node. If the node is not registered, register it on chain, otherwise just
 // update its socket on chain.
 func (n *Node) Start(ctx context.Context) error {
+	pprofProfiler := pprof.NewPprofProfiler(n.Config.PprofHttpPort, n.Logger)
+	if n.Config.EnablePprof {
+		go pprofProfiler.Start()
+		n.Logger.Info("Enabled pprof for Node", "port", n.Config.PprofHttpPort)
+	}
 	if n.Config.EnableMetrics {
 		n.Metrics.Start()
 		n.Logger.Info("Enabled metrics", "socket", n.Metrics.socketAddr)
@@ -252,6 +310,12 @@ func (n *Node) Start(ctx context.Context) error {
 	go n.expireLoop()
 	go n.checkNodeReachability()
 
+	if n.Config.EnableV2 {
+		go func() {
+			_ = n.RefreshOnchainState(ctx)
+		}()
+	}
+
 	// Build the socket based on the hostname/IP provided in the CLI
 	socket := string(core.MakeOperatorSocket(n.Config.Hostname, n.Config.DispersalPort, n.Config.RetrievalPort))
 	var operator *Operator
@@ -259,7 +323,6 @@ func (n *Node) Start(ctx context.Context) error {
 		n.Logger.Info("Registering node on chain with the following parameters:", "operatorId",
 			n.Config.ID.Hex(), "hostname", n.Config.Hostname, "dispersalPort", n.Config.DispersalPort,
 			"retrievalPort", n.Config.RetrievalPort, "churnerUrl", n.Config.ChurnerUrl, "quorumIds", fmt.Sprint(n.Config.QuorumIDList))
-		socket := string(core.MakeOperatorSocket(n.Config.Hostname, n.Config.DispersalPort, n.Config.RetrievalPort))
 		privateKey, err := crypto.HexToECDSA(n.Config.EthClientConfig.PrivateKeyString)
 		if err != nil {
 			return fmt.Errorf("NewClient: cannot parse private key: %w", err)
@@ -280,6 +343,15 @@ func (n *Node) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to register the operator: %w", err)
 		}
 	} else {
+		registeredSocket, err := n.Transactor.GetOperatorSocket(ctx, n.Config.ID)
+		// Error out if registration on-chain is a requirement
+		if err != nil {
+			n.Logger.Warnf("failed to get operator socket: %w", err)
+		}
+		if registeredSocket != socket {
+			n.Logger.Warnf("registered socket %s does not match expected socket %s", registeredSocket, socket)
+		}
+
 		eigenDAUrl, ok := eigenDAUIMap[n.ChainID.String()]
 		if ok {
 			n.Logger.Infof("The node has successfully started. Note: if it's not opted in on %s, then please follow the EigenDA operator guide section in docs.eigenlayer.xyz to register", eigenDAUrl)
@@ -331,6 +403,70 @@ func (n *Node) expireLoop() {
 			} else {
 				n.Logger.Error("Expiration cycle encountered error when removing expired batches, which will be retried in next cycle", "err", err)
 			}
+		}
+	}
+}
+
+// RefreshOnchainState refreshes the onchain state of the node.
+// It fetches the latest blob parameters from the chain and updates the BlobVersionParams.
+// It runs periodically based on the OnchainStateRefreshInterval.
+// WARNING: this method is not thread-safe and should not be called concurrently.
+func (n *Node) RefreshOnchainState(ctx context.Context) error {
+	if !n.Config.EnableV2 || n.Config.OnchainStateRefreshInterval <= 0 {
+		return nil
+	}
+	ticker := time.NewTicker(n.Config.OnchainStateRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			n.Logger.Info("Refreshing onchain state")
+			existingBlobParams := n.BlobVersionParams.Load()
+			blobParams, err := n.Transactor.GetAllVersionedBlobParams(ctx)
+			if err == nil {
+				if existingBlobParams == nil || !existingBlobParams.Equal(blobParams) {
+					n.BlobVersionParams.Store(v2.NewBlobVersionParameterMap(blobParams))
+				}
+			} else {
+				n.Logger.Error("error fetching blob params", "err", err)
+			}
+
+			existingRelayClient, ok := n.RelayClient.Load().(clients.RelayClient)
+			if !ok {
+				n.Logger.Error("error fetching relay client")
+				continue
+			}
+
+			existingURLs := map[v2.RelayKey]string{}
+			if existingRelayClient != nil {
+				existingURLs = existingRelayClient.GetSockets()
+			}
+			relayURLs, err := n.Transactor.GetRelayURLs(ctx)
+			if err != nil {
+				n.Logger.Error("error fetching relay URLs", "err", err)
+				continue
+			}
+
+			if maps.Equal(existingURLs, relayURLs) {
+				n.Logger.Info("No change in relay URLs")
+				continue
+			}
+
+			relayClient, err := clients.NewRelayClient(&clients.RelayClientConfig{
+				Sockets:           relayURLs,
+				UseSecureGrpcFlag: n.Config.UseSecureGrpc,
+				OperatorID:        &n.Config.ID,
+				MessageSigner:     n.SignMessage,
+			}, n.Logger)
+			if err != nil {
+				n.Logger.Error("error creating relay client", "err", err)
+				continue
+			}
+
+			n.RelayClient.Store(clients.RelayClient(relayClient))
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }

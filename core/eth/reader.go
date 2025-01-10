@@ -3,17 +3,24 @@ package eth
 import (
 	"context"
 	"crypto/ecdsa"
+	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/Layr-Labs/eigenda/common"
 	avsdir "github.com/Layr-Labs/eigenda/contracts/bindings/AVSDirectory"
 	blsapkreg "github.com/Layr-Labs/eigenda/contracts/bindings/BLSApkRegistry"
 	delegationmgr "github.com/Layr-Labs/eigenda/contracts/bindings/DelegationManager"
+	disperserreg "github.com/Layr-Labs/eigenda/contracts/bindings/EigenDADisperserRegistry"
+	relayreg "github.com/Layr-Labs/eigenda/contracts/bindings/EigenDARelayRegistry"
 	eigendasrvmg "github.com/Layr-Labs/eigenda/contracts/bindings/EigenDAServiceManager"
+	thresholdreg "github.com/Layr-Labs/eigenda/contracts/bindings/EigenDAThresholdRegistry"
 	ejectionmg "github.com/Layr-Labs/eigenda/contracts/bindings/EjectionManager"
 	indexreg "github.com/Layr-Labs/eigenda/contracts/bindings/IIndexRegistry"
 	opstateretriever "github.com/Layr-Labs/eigenda/contracts/bindings/OperatorStateRetriever"
+	paymentvault "github.com/Layr-Labs/eigenda/contracts/bindings/PaymentVault"
 	regcoordinator "github.com/Layr-Labs/eigenda/contracts/bindings/RegistryCoordinator"
+	socketreg "github.com/Layr-Labs/eigenda/contracts/bindings/SocketRegistry"
 	stakereg "github.com/Layr-Labs/eigenda/contracts/bindings/StakeRegistry"
 	"github.com/Layr-Labs/eigenda/core"
 	"github.com/Layr-Labs/eigensdk-go/logging"
@@ -36,6 +43,11 @@ type ContractBindings struct {
 	EigenDAServiceManager *eigendasrvmg.ContractEigenDAServiceManager
 	EjectionManager       *ejectionmg.ContractEjectionManager
 	AVSDirectory          *avsdir.ContractAVSDirectory
+	SocketRegistry        *socketreg.ContractSocketRegistry
+	PaymentVault          *paymentvault.ContractPaymentVault
+	RelayRegistry         *relayreg.ContractEigenDARelayRegistry
+	ThresholdRegistry     *thresholdreg.ContractEigenDAThresholdRegistry
+	DisperserRegistry     *disperserreg.ContractEigenDADisperserRegistry
 }
 
 type Reader struct {
@@ -163,10 +175,78 @@ func (t *Reader) updateContractBindings(blsOperatorStateRetrieverAddr, eigenDASe
 		return err
 	}
 
+	var contractSocketRegistry *socketreg.ContractSocketRegistry
+	socketRegistryAddr, err := contractIRegistryCoordinator.SocketRegistry(&bind.CallOpts{})
+	if err != nil {
+		t.logger.Warn("Failed to fetch SocketRegistry address", "err", err)
+		// TODO: don't panic until there is socket registry deployment
+		// return err
+	} else {
+		contractSocketRegistry, err = socketreg.NewContractSocketRegistry(socketRegistryAddr, t.ethClient)
+		if err != nil {
+			t.logger.Error("Failed to fetch SocketRegistry contract", "err", err)
+			return err
+		}
+	}
+
+	var contractRelayRegistry *relayreg.ContractEigenDARelayRegistry
+	relayRegistryAddr, err := contractEigenDAServiceManager.EigenDARelayRegistry(&bind.CallOpts{})
+	if err != nil {
+		t.logger.Error("Failed to fetch IEigenDARelayRegistry contract", "err", err)
+		// TODO(ian-shim): return err when the contract is deployed
+	} else {
+		contractRelayRegistry, err = relayreg.NewContractEigenDARelayRegistry(relayRegistryAddr, t.ethClient)
+		if err != nil {
+			t.logger.Error("Failed to fetch IEigenDARelayRegistry contract", "err", err)
+		}
+	}
+
+	var contractThresholdRegistry *thresholdreg.ContractEigenDAThresholdRegistry
+	thresholdRegistryAddr, err := contractEigenDAServiceManager.EigenDAThresholdRegistry(&bind.CallOpts{})
+	if err != nil {
+		t.logger.Error("Failed to fetch EigenDAThresholdRegistry contract", "err", err)
+		// TODO(ian-shim): return err when the contract is deployed
+	} else {
+		contractThresholdRegistry, err = thresholdreg.NewContractEigenDAThresholdRegistry(thresholdRegistryAddr, t.ethClient)
+		if err != nil {
+			t.logger.Error("Failed to fetch EigenDAThresholdRegistry contract", "err", err)
+		}
+	}
+
+	var contractPaymentVault *paymentvault.ContractPaymentVault
+	paymentVaultAddr, err := contractEigenDAServiceManager.PaymentVault(&bind.CallOpts{})
+	if err != nil {
+		t.logger.Error("Failed to fetch PaymentVault address", "err", err)
+		//TODO(hopeyen): return err when the contract is deployed
+		// return err
+	} else {
+		contractPaymentVault, err = paymentvault.NewContractPaymentVault(paymentVaultAddr, t.ethClient)
+		if err != nil {
+			t.logger.Error("Failed to fetch PaymentVault contract", "err", err)
+			return err
+		}
+	}
+
+	var contractEigenDADisperserRegistry *disperserreg.ContractEigenDADisperserRegistry
+	disperserRegistryAddr, err := contractEigenDAServiceManager.EigenDADisperserRegistry(&bind.CallOpts{})
+	if err != nil {
+		t.logger.Error("Failed to fetch EigenDADisperserRegistry address", "err", err)
+		// TODO(cody-littley): return err when the contract is deployed
+		// return err
+	} else {
+		contractEigenDADisperserRegistry, err =
+			disperserreg.NewContractEigenDADisperserRegistry(disperserRegistryAddr, t.ethClient)
+		if err != nil {
+			t.logger.Error("Failed to fetch EigenDADisperserRegistry contract", "err", err)
+			return err
+		}
+	}
+
 	t.bindings = &ContractBindings{
 		ServiceManagerAddr:    eigenDAServiceManagerAddr,
 		RegCoordinatorAddr:    registryCoordinatorAddr,
 		AVSDirectory:          contractAVSDirectory,
+		SocketRegistry:        contractSocketRegistry,
 		OpStateRetriever:      contractBLSOpStateRetr,
 		BLSApkRegistry:        contractBLSPubkeyReg,
 		IndexRegistry:         contractIIndexReg,
@@ -175,6 +255,10 @@ func (t *Reader) updateContractBindings(blsOperatorStateRetrieverAddr, eigenDASe
 		StakeRegistry:         contractStakeRegistry,
 		EigenDAServiceManager: contractEigenDAServiceManager,
 		DelegationManager:     contractDelegationManager,
+		RelayRegistry:         contractRelayRegistry,
+		PaymentVault:          contractPaymentVault,
+		ThresholdRegistry:     contractThresholdRegistry,
+		DisperserRegistry:     contractEigenDADisperserRegistry,
 	}
 	return nil
 }
@@ -372,6 +456,12 @@ func (t *Reader) GetOperatorStakesForQuorums(ctx context.Context, quorums []core
 
 func (t *Reader) StakeRegistry(ctx context.Context) (gethcommon.Address, error) {
 	return t.bindings.RegistryCoordinator.StakeRegistry(&bind.CallOpts{
+		Context: ctx,
+	})
+}
+
+func (t *Reader) SocketRegistry(ctx context.Context) (gethcommon.Address, error) {
+	return t.bindings.RegistryCoordinator.SocketRegistry(&bind.CallOpts{
 		Context: ctx,
 	})
 }
@@ -580,42 +670,291 @@ func (t *Reader) GetRequiredQuorumNumbers(ctx context.Context, blockNumber uint3
 	return requiredQuorums, nil
 }
 
-func (t *Reader) GetActiveReservations(ctx context.Context, blockNumber uint32, accountIDs []string) (map[string]core.ActiveReservation, error) {
-	// contract is not implemented yet
-	return map[string]core.ActiveReservation{}, nil
+func (t *Reader) GetNumBlobVersions(ctx context.Context) (uint16, error) {
+	if t.bindings.ThresholdRegistry == nil {
+		return 0, errors.New("threshold registry not deployed")
+	}
+
+	return t.bindings.ThresholdRegistry.NextBlobVersion(&bind.CallOpts{
+		Context: ctx,
+	})
 }
 
-func (t *Reader) GetActiveReservationByAccount(ctx context.Context, blockNumber uint32, accountID string) (core.ActiveReservation, error) {
-	// contract is not implemented yet
-	return core.ActiveReservation{}, nil
+func (t *Reader) GetVersionedBlobParams(ctx context.Context, blobVersion uint16) (*core.BlobVersionParameters, error) {
+	params, err := t.bindings.EigenDAServiceManager.GetBlobParams(&bind.CallOpts{
+		Context: ctx,
+	}, uint16(blobVersion))
+	if err != nil {
+		return nil, err
+	}
+	return &core.BlobVersionParameters{
+		CodingRate:      uint32(params.CodingRate),
+		NumChunks:       uint32(params.NumChunks),
+		MaxNumOperators: uint32(params.MaxNumOperators),
+	}, nil
 }
 
-func (t *Reader) GetOnDemandPayments(ctx context.Context, blockNumber uint32, accountIDs []string) (map[string]core.OnDemandPayment, error) {
-	// contract is not implemented yet
-	return map[string]core.OnDemandPayment{}, nil
+func (t *Reader) GetAllVersionedBlobParams(ctx context.Context) (map[uint16]*core.BlobVersionParameters, error) {
+	if t.bindings.ThresholdRegistry == nil {
+		return nil, errors.New("threshold registry not deployed")
+	}
+
+	numBlobVersions, err := t.GetNumBlobVersions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make(map[uint16]*core.BlobVersionParameters)
+	for version := uint16(0); version < uint16(numBlobVersions); version++ {
+		params, err := t.GetVersionedBlobParams(ctx, version)
+		if err != nil && strings.Contains(err.Error(), "execution reverted") {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+
+		res[version] = params
+	}
+
+	if len(res) == 0 {
+		return nil, errors.New("no blob version parameters found")
+	}
+
+	return res, nil
 }
 
-func (t *Reader) GetOnDemandPaymentByAccount(ctx context.Context, blockNumber uint32, accountID string) (core.OnDemandPayment, error) {
-	// contract is not implemented yet
-	return core.OnDemandPayment{}, nil
+func (t *Reader) GetReservedPayments(ctx context.Context, accountIDs []gethcommon.Address) (map[gethcommon.Address]*core.ReservedPayment, error) {
+	if t.bindings.PaymentVault == nil {
+		return nil, errors.New("payment vault not deployed")
+	}
+	reservationsMap := make(map[gethcommon.Address]*core.ReservedPayment)
+	reservations, err := t.bindings.PaymentVault.GetReservations(&bind.CallOpts{
+		Context: ctx,
+	}, accountIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// since reservations are returned in the same order as the accountIDs, we can directly map them
+	for i, reservation := range reservations {
+		res, err := ConvertToReservedPayment(reservation)
+		if err != nil {
+			t.logger.Warn("failed to get active reservation", "account", accountIDs[i], "err", err)
+			continue
+		}
+
+		reservationsMap[accountIDs[i]] = res
+	}
+
+	return reservationsMap, nil
+}
+
+func (t *Reader) GetReservedPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*core.ReservedPayment, error) {
+	if t.bindings.PaymentVault == nil {
+		return nil, errors.New("payment vault not deployed")
+	}
+	reservation, err := t.bindings.PaymentVault.GetReservation(&bind.CallOpts{
+		Context: ctx,
+	}, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return ConvertToReservedPayment(reservation)
+}
+
+func (t *Reader) GetOnDemandPayments(ctx context.Context, accountIDs []gethcommon.Address) (map[gethcommon.Address]*core.OnDemandPayment, error) {
+	if t.bindings.PaymentVault == nil {
+		return nil, errors.New("payment vault not deployed")
+	}
+	paymentsMap := make(map[gethcommon.Address]*core.OnDemandPayment)
+	payments, err := t.bindings.PaymentVault.GetOnDemandTotalDeposits(&bind.CallOpts{
+		Context: ctx}, accountIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// since payments are returned in the same order as the accountIDs, we can directly map them
+	for i, payment := range payments {
+		if payment.Cmp(big.NewInt(0)) == 0 {
+			t.logger.Warn("failed to get on demand payment for account", "account", accountIDs[i])
+			continue
+		}
+		paymentsMap[accountIDs[i]] = &core.OnDemandPayment{
+			CumulativePayment: payment,
+		}
+	}
+
+	return paymentsMap, nil
+}
+
+func (t *Reader) GetOnDemandPaymentByAccount(ctx context.Context, accountID gethcommon.Address) (*core.OnDemandPayment, error) {
+	if t.bindings.PaymentVault == nil {
+		return nil, errors.New("payment vault not deployed")
+	}
+	onDemandPayment, err := t.bindings.PaymentVault.GetOnDemandTotalDeposit(&bind.CallOpts{
+		Context: ctx,
+	}, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if onDemandPayment.Cmp(big.NewInt(0)) == 0 {
+		return nil, errors.New("ondemand payment does not exist for given account")
+	}
+	return &core.OnDemandPayment{
+		CumulativePayment: onDemandPayment,
+	}, nil
 }
 
 func (t *Reader) GetGlobalSymbolsPerSecond(ctx context.Context) (uint64, error) {
-	// contract is not implemented yet
-	return 0, nil
+	if t.bindings.PaymentVault == nil {
+		return 0, errors.New("payment vault not deployed")
+	}
+	globalSymbolsPerSecond, err := t.bindings.PaymentVault.GlobalSymbolsPerPeriod(&bind.CallOpts{
+		Context: ctx,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return globalSymbolsPerSecond, nil
+}
+
+func (t *Reader) GetGlobalRatePeriodInterval(ctx context.Context) (uint32, error) {
+	if t.bindings.PaymentVault == nil {
+		return 0, errors.New("payment vault not deployed")
+	}
+	globalRateBinInterval, err := t.bindings.PaymentVault.GlobalRatePeriodInterval(&bind.CallOpts{
+		Context: ctx,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return uint32(globalRateBinInterval), nil
 }
 
 func (t *Reader) GetMinNumSymbols(ctx context.Context) (uint32, error) {
-	// contract is not implemented yet
-	return 0, nil
+	if t.bindings.PaymentVault == nil {
+		return 0, errors.New("payment vault not deployed")
+	}
+	minNumSymbols, err := t.bindings.PaymentVault.MinNumSymbols(&bind.CallOpts{
+		Context: ctx,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return uint32(minNumSymbols), nil
 }
 
 func (t *Reader) GetPricePerSymbol(ctx context.Context) (uint32, error) {
-	// contract is not implemented yet
-	return 0, nil
+	if t.bindings.PaymentVault == nil {
+		return 0, errors.New("payment vault not deployed")
+	}
+	pricePerSymbol, err := t.bindings.PaymentVault.PricePerSymbol(&bind.CallOpts{
+		Context: ctx,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return uint32(pricePerSymbol), nil
 }
 
 func (t *Reader) GetReservationWindow(ctx context.Context) (uint32, error) {
-	// contract is not implemented yet
-	return 0, nil
+	if t.bindings.PaymentVault == nil {
+		return 0, errors.New("payment vault not deployed")
+	}
+	reservationWindow, err := t.bindings.PaymentVault.ReservationPeriodInterval(&bind.CallOpts{
+		Context: ctx})
+	if err != nil {
+		return 0, err
+	}
+	return uint32(reservationWindow), nil
+}
+
+func (t *Reader) GetOperatorSocket(ctx context.Context, operatorId core.OperatorID) (string, error) {
+	if t.bindings.SocketRegistry == nil {
+		return "", errors.New("socket registry not enabled")
+	}
+	socket, err := t.bindings.SocketRegistry.GetOperatorSocket(&bind.CallOpts{
+		Context: ctx}, [32]byte(operatorId))
+	if err != nil {
+		return "", err
+	}
+	if socket == "" {
+		return "", errors.New("operator socket string is empty, check operator with id: " + operatorId.Hex())
+	}
+	return socket, nil
+}
+
+func (t *Reader) GetNumRelays(ctx context.Context) (uint32, error) {
+	if t.bindings.RelayRegistry == nil {
+		return 0, errors.New("relay registry not deployed")
+	}
+
+	return t.bindings.RelayRegistry.NextRelayKey(&bind.CallOpts{
+		Context: ctx,
+	})
+}
+
+func (t *Reader) GetRelayURL(ctx context.Context, key uint32) (string, error) {
+	if t.bindings.RelayRegistry == nil {
+		return "", errors.New("relay registry not deployed")
+	}
+
+	return t.bindings.RelayRegistry.RelayKeyToUrl(&bind.CallOpts{
+		Context: ctx,
+	}, uint32(key))
+}
+
+func (t *Reader) GetRelayURLs(ctx context.Context) (map[uint32]string, error) {
+	if t.bindings.RelayRegistry == nil {
+		return nil, errors.New("relay registry not deployed")
+	}
+
+	numRelays, err := t.GetNumRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make(map[uint32]string)
+	for relayKey := uint32(0); relayKey < numRelays; relayKey++ {
+		url, err := t.bindings.RelayRegistry.RelayKeyToUrl(&bind.CallOpts{
+			Context: ctx,
+		}, relayKey)
+
+		if err != nil && strings.Contains(err.Error(), "execution reverted") {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+
+		res[relayKey] = url
+	}
+
+	if len(res) == 0 {
+		return nil, errors.New("no relay URLs found")
+	}
+
+	return res, nil
+}
+
+func (t *Reader) GetDisperserAddress(ctx context.Context, disperserID uint32) (gethcommon.Address, error) {
+	registry := t.bindings.DisperserRegistry
+	if registry == nil {
+		return gethcommon.Address{}, errors.New("disperser registry not deployed")
+	}
+
+	address, err := registry.DisperserKeyToAddress(
+		&bind.CallOpts{
+			Context: ctx,
+		},
+		disperserID)
+
+	var defaultAddress gethcommon.Address
+	if err != nil {
+		return defaultAddress, fmt.Errorf("failed to get disperser address: %w", err)
+	}
+	if address == defaultAddress {
+		return defaultAddress, fmt.Errorf("disperser with id %d not found", disperserID)
+	}
+
+	return address, nil
 }

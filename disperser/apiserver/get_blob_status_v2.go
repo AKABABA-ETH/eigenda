@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Layr-Labs/eigenda/api"
 	pb "github.com/Layr-Labs/eigenda/api/grpc/disperser/v2"
@@ -13,6 +14,11 @@ import (
 )
 
 func (s *DispersalServerV2) GetBlobStatus(ctx context.Context, req *pb.BlobStatusRequest) (*pb.BlobStatusReply, error) {
+	start := time.Now()
+	defer func() {
+		s.metrics.reportGetBlobStatusLatency(time.Since(start))
+	}()
+
 	if req.GetBlobKey() == nil || len(req.GetBlobKey()) != 32 {
 		return nil, api.NewErrorInvalidArg("invalid blob key")
 	}
@@ -78,12 +84,18 @@ func (s *DispersalServerV2) GetBlobStatus(ctx context.Context, req *pb.BlobStatu
 			continue
 		}
 
+		attestationProto, err := attestation.ToProtobuf()
+		if err != nil {
+			s.logger.Error("failed to convert attestation to protobuf", "err", err, "blobKey", blobKey.Hex())
+			continue
+		}
+
 		// return the first signed batch found
 		return &pb.BlobStatusReply{
 			Status: metadata.BlobStatus.ToProfobuf(),
 			SignedBatch: &pb.SignedBatch{
 				Header:      batchHeader.ToProtobuf(),
-				Attestation: attestation.ToProtobuf(),
+				Attestation: attestationProto,
 			},
 			BlobVerificationInfo: blobVerificationInfoProto,
 		}, nil

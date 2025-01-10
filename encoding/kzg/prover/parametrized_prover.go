@@ -2,7 +2,6 @@ package prover
 
 import (
 	"fmt"
-	"log"
 	"log/slog"
 	"time"
 
@@ -16,12 +15,14 @@ import (
 )
 
 type ParametrizedProver struct {
+	encoding.EncodingParams
 	*rs.Encoder
 
-	*kzg.KzgConfig
-	Ks *kzg.KZGSettings
+	KzgConfig *kzg.KzgConfig
+	Ks        *kzg.KZGSettings
 
-	Computer ProofDevice
+	KzgMultiProofBackend  KzgMultiProofsBackend
+	KzgCommitmentsBackend KzgCommitmentsBackend
 }
 
 type rsEncodeResult struct {
@@ -32,19 +33,19 @@ type rsEncodeResult struct {
 }
 
 type lengthCommitmentResult struct {
-	LengthCommitment bn254.G2Affine
+	LengthCommitment *bn254.G2Affine
 	Duration         time.Duration
 	Err              error
 }
 
 type lengthProofResult struct {
-	LengthProof bn254.G2Affine
+	LengthProof *bn254.G2Affine
 	Duration    time.Duration
 	Err         error
 }
 
 type commitmentResult struct {
-	Commitment bn254.G1Affine
+	Commitment *bn254.G1Affine
 	Duration   time.Duration
 	Err        error
 }
@@ -84,7 +85,7 @@ func (g *ParametrizedProver) Encode(inputFr []fr.Element) (*bn254.G1Affine, *bn2
 	// inputFr is untouched
 	// compute chunks
 	go func() {
-		commitment, lengthCommitment, lengthProof, err := g.GetCommitments(inputFr)
+		commitment, lengthCommitment, lengthProof, err := g.GetCommitments(inputFr, uint64(len(inputFr)))
 
 		commitmentsChan <- commitmentsResult{
 			commitment:       commitment,
@@ -104,15 +105,17 @@ func (g *ParametrizedProver) Encode(inputFr []fr.Element) (*bn254.G1Affine, *bn2
 		return nil, nil, nil, nil, nil, commitmentResult.Error
 	}
 
-	totalProcessingTime := time.Since(encodeStart)
+	slog.Info("Encoding process details",
+		"Input_size_bytes", len(inputFr)*encoding.BYTES_PER_SYMBOL,
+		"Num_chunks", g.NumChunks,
+		"Chunk_length", g.ChunkLength,
+		"Total_duration", time.Since(encodeStart),
+	)
 
-	if g.Verbose {
-		log.Printf("Total encoding took      %v\n", totalProcessingTime)
-	}
 	return commitmentResult.commitment, commitmentResult.lengthCommitment, commitmentResult.lengthProof, frames, indices, nil
 }
 
-func (g *ParametrizedProver) GetCommitments(inputFr []fr.Element) (*bn254.G1Affine, *bn254.G2Affine, *bn254.G2Affine, error) {
+func (g *ParametrizedProver) GetCommitments(inputFr []fr.Element, length uint64) (*bn254.G1Affine, *bn254.G2Affine, *bn254.G2Affine, error) {
 	if err := g.validateInput(inputFr); err != nil {
 		return nil, nil, nil, err
 	}
@@ -126,9 +129,9 @@ func (g *ParametrizedProver) GetCommitments(inputFr []fr.Element) (*bn254.G1Affi
 	// compute commit for the full poly
 	go func() {
 		start := time.Now()
-		commit, err := g.Computer.ComputeCommitment(inputFr)
+		commit, err := g.KzgCommitmentsBackend.ComputeCommitment(inputFr)
 		commitmentChan <- commitmentResult{
-			Commitment: *commit,
+			Commitment: commit,
 			Err:        err,
 			Duration:   time.Since(start),
 		}
@@ -136,9 +139,9 @@ func (g *ParametrizedProver) GetCommitments(inputFr []fr.Element) (*bn254.G1Affi
 
 	go func() {
 		start := time.Now()
-		lengthCommitment, err := g.Computer.ComputeLengthCommitment(inputFr)
+		lengthCommitment, err := g.KzgCommitmentsBackend.ComputeLengthCommitment(inputFr)
 		lengthCommitmentChan <- lengthCommitmentResult{
-			LengthCommitment: *lengthCommitment,
+			LengthCommitment: lengthCommitment,
 			Err:              err,
 			Duration:         time.Since(start),
 		}
@@ -146,9 +149,9 @@ func (g *ParametrizedProver) GetCommitments(inputFr []fr.Element) (*bn254.G1Affi
 
 	go func() {
 		start := time.Now()
-		lengthProof, err := g.Computer.ComputeLengthProof(inputFr)
+		lengthProof, err := g.KzgCommitmentsBackend.ComputeLengthProofForLength(inputFr, length)
 		lengthProofChan <- lengthProofResult{
-			LengthProof: *lengthProof,
+			LengthProof: lengthProof,
 			Err:         err,
 			Duration:    time.Since(start),
 		}
@@ -164,24 +167,25 @@ func (g *ParametrizedProver) GetCommitments(inputFr []fr.Element) (*bn254.G1Affi
 	}
 	totalProcessingTime := time.Since(encodeStart)
 
-	log.Printf("\n\t\tCommiting     %-v\n\t\tLengthCommit  %-v\n\t\tlengthProof   %-v\n\t\tMetaInfo. order  %-v shift %v\n",
-		commitmentResult.Duration,
-		lengthCommitmentResult.Duration,
-		lengthProofResult.Duration,
-		g.SRSOrder,
-		g.SRSOrder-uint64(len(inputFr)),
+	slog.Info("Commitment process details",
+		"Input_size_bytes", len(inputFr)*encoding.BYTES_PER_SYMBOL,
+		"Total_duration", totalProcessingTime,
+		"Commiting_duration", commitmentResult.Duration,
+		"LengthCommit_duration", lengthCommitmentResult.Duration,
+		"lengthProof_duration", lengthProofResult.Duration,
+		"SRSOrder", g.KzgConfig.SRSOrder,
+		"SRSOrder_shift", g.KzgConfig.SRSOrder-uint64(len(inputFr)),
 	)
 
-	if g.Verbose {
-		log.Printf("Total encoding took      %v\n", totalProcessingTime)
-	}
-	return &commitmentResult.Commitment, &lengthCommitmentResult.LengthCommitment, &lengthProofResult.LengthProof, nil
+	return commitmentResult.Commitment, lengthCommitmentResult.LengthCommitment, lengthProofResult.LengthProof, nil
 }
 
 func (g *ParametrizedProver) GetFrames(inputFr []fr.Element) ([]encoding.Frame, []uint32, error) {
 	if err := g.validateInput(inputFr); err != nil {
 		return nil, nil, err
 	}
+
+	encodeStart := time.Now()
 
 	proofChan := make(chan proofsResult, 1)
 	rsChan := make(chan rsEncodeResult, 1)
@@ -190,7 +194,8 @@ func (g *ParametrizedProver) GetFrames(inputFr []fr.Element) ([]encoding.Frame, 
 	// compute chunks
 	go func() {
 		start := time.Now()
-		frames, indices, err := g.Encoder.Encode(inputFr)
+
+		frames, indices, err := g.Encoder.Encode(inputFr, g.EncodingParams)
 		rsChan <- rsEncodeResult{
 			Frames:   frames,
 			Indices:  indices,
@@ -212,7 +217,7 @@ func (g *ParametrizedProver) GetFrames(inputFr []fr.Element) ([]encoding.Frame, 
 			flatpaddedCoeffs = append(flatpaddedCoeffs, paddedCoeffs...)
 		}
 
-		proofs, err := g.Computer.ComputeMultiFrameProof(flatpaddedCoeffs, g.NumChunks, g.ChunkLength, g.NumWorker)
+		proofs, err := g.KzgMultiProofBackend.ComputeMultiFrameProof(flatpaddedCoeffs, g.NumChunks, g.ChunkLength, g.KzgConfig.NumWorker)
 		proofChan <- proofsResult{
 			Proofs:   proofs,
 			Err:      err,
@@ -227,11 +232,16 @@ func (g *ParametrizedProver) GetFrames(inputFr []fr.Element) ([]encoding.Frame, 
 		return nil, nil, multierror.Append(rsResult.Err, proofsResult.Err)
 	}
 
-	log.Printf("\n\t\tRS encode     %-v\n\t\tmultiProof    %-v\n\t\tMetaInfo. order  %-v shift %v\n",
-		rsResult.Duration,
-		proofsResult.Duration,
-		g.SRSOrder,
-		g.SRSOrder-uint64(len(inputFr)),
+	totalProcessingTime := time.Since(encodeStart)
+	slog.Info("Frame process details",
+		"Input_size_bytes", len(inputFr)*encoding.BYTES_PER_SYMBOL,
+		"Num_chunks", g.NumChunks,
+		"Chunk_length", g.ChunkLength,
+		"Total_duration", totalProcessingTime,
+		"RS_encode_duration", rsResult.Duration,
+		"multiProof_duration", proofsResult.Duration,
+		"SRSOrder", g.KzgConfig.SRSOrder,
+		"SRSOrder_shift", g.KzgConfig.SRSOrder-uint64(len(inputFr)),
 	)
 
 	// assemble frames
@@ -259,7 +269,7 @@ func (g *ParametrizedProver) GetMultiFrameProofs(inputFr []fr.Element) ([]encodi
 	copy(paddedCoeffs, inputFr)
 	paddingEnd := time.Since(paddingStart)
 
-	proofs, err := g.Computer.ComputeMultiFrameProof(paddedCoeffs, g.NumChunks, g.ChunkLength, g.NumWorker)
+	proofs, err := g.KzgMultiProofBackend.ComputeMultiFrameProof(paddedCoeffs, g.NumChunks, g.ChunkLength, g.KzgConfig.NumWorker)
 
 	end := time.Since(start)
 
@@ -269,8 +279,8 @@ func (g *ParametrizedProver) GetMultiFrameProofs(inputFr []fr.Element) ([]encodi
 		"Chunk_length", g.ChunkLength,
 		"Total_duration", end,
 		"Padding_duration", paddingEnd,
-		"SRSOrder", g.SRSOrder,
-		"SRSOrder_shift", g.SRSOrder-uint64(len(inputFr)),
+		"SRSOrder", g.KzgConfig.SRSOrder,
+		"SRSOrder_shift", g.KzgConfig.SRSOrder-uint64(len(inputFr)),
 	)
 
 	return proofs, err

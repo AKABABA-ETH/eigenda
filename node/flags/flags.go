@@ -66,11 +66,11 @@ var (
 		Required: true,
 		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "ENABLE_METRICS"),
 	}
-	MetricsPortFlag = cli.StringFlag{
+	MetricsPortFlag = cli.IntFlag{
 		Name:     common.PrefixFlag(FlagPrefix, "metrics-port"),
 		Usage:    "Port at which node listens for metrics calls",
 		Required: false,
-		Value:    "9091",
+		Value:    9091,
 		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "METRICS_PORT"),
 	}
 	OnchainMetricsIntervalFlag = cli.StringFlag{
@@ -218,6 +218,53 @@ var (
 		Required: false,
 		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "ENABLE_GNARK_BUNDLE_ENCODING"),
 	}
+	EnableV2Flag = cli.BoolFlag{
+		Name:     "enable-v2",
+		Usage:    "Enable V2 features",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "ENABLE_V2"),
+	}
+	OnchainStateRefreshIntervalFlag = cli.DurationFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "onchain-state-refresh-interval"),
+		Usage:    "The interval at which to refresh the onchain state. This flag is only relevant in v2 (default: 1h)",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "ONCHAIN_STATE_REFRESH_INTERVAL"),
+		Value:    1 * time.Hour,
+	}
+	ChunkDownloadTimeoutFlag = cli.DurationFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "chunk-download-timeout"),
+		Usage:    "The timeout for downloading chunks from the relay (default: 30s)",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "CHUNK_DOWNLOAD_TIMEOUT"),
+		Value:    20 * time.Second,
+	}
+	DisableDispersalAuthenticationFlag = cli.BoolFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "disable-dispersal-authentication"),
+		Usage:    "Disable authentication for StoreChunks() calls from the disperser",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "DISABLE_DISPERSAL_AUTHENTICATION"),
+	}
+	DispersalAuthenticationKeyCacheSizeFlag = cli.IntFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "dispersal-authentication-key-cache-size"),
+		Usage:    "The size of the dispersal authentication key cache",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "DISPERSAL_AUTHENTICATION_KEY_CACHE_SIZE"),
+		Value:    1024,
+	}
+	DisperserKeyTimeoutFlag = cli.DurationFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "disperser-key-timeout"),
+		Usage:    "The duration for which a disperser key is cached",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "DISPERSER_KEY_TIMEOUT"),
+		Value:    1 * time.Hour,
+	}
+	DispersalAuthenticationTimeoutFlag = cli.DurationFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "dispersal-authentication-timeout"),
+		Usage:    "The duration for which a disperser authentication is valid",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "DISPERSAL_AUTHENTICATION_TIMEOUT"),
+		Value:    time.Minute,
+	}
 
 	// Test only, DO NOT USE the following flags in production
 
@@ -300,6 +347,19 @@ var (
 		Required: false,
 		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "BLS_SIGNER_CERT_FILE"),
 	}
+	PprofHttpPort = cli.StringFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "pprof-http-port"),
+		Usage:    "the http port which the pprof server is listening",
+		Required: false,
+		Value:    "6060",
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "PPROF_HTTP_PORT"),
+	}
+	EnablePprof = cli.BoolFlag{
+		Name:     common.PrefixFlag(FlagPrefix, "enable-pprof"),
+		Usage:    "start prrof server",
+		Required: false,
+		EnvVar:   common.PrefixEnvVar(EnvVarPrefix, "ENABLE_PPROF"),
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -346,6 +406,15 @@ var optionalFlags = []cli.Flag{
 	BLSRemoteSignerUrlFlag,
 	BLSPublicKeyHexFlag,
 	BLSSignerCertFileFlag,
+	EnableV2Flag,
+	OnchainStateRefreshIntervalFlag,
+	ChunkDownloadTimeoutFlag,
+	PprofHttpPort,
+	EnablePprof,
+	DisableDispersalAuthenticationFlag,
+	DispersalAuthenticationKeyCacheSizeFlag,
+	DisperserKeyTimeoutFlag,
+	DispersalAuthenticationTimeoutFlag,
 }
 
 func init() {

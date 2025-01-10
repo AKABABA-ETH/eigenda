@@ -23,18 +23,19 @@ func TestBlobKey(t *testing.T) {
 func TestPaymentHash(t *testing.T) {
 	pm := core.PaymentMetadata{
 		AccountID:         "0x123",
-		BinIndex:          5,
+		ReservationPeriod: 5,
 		CumulativePayment: big.NewInt(100),
+		Salt:              42,
 	}
 	hash, err := pm.Hash()
 	assert.NoError(t, err)
-	// 0xf5894a8e9281b5687c0c7757d3d45fb76152bf659e6e61b1062f4c6bcb69c449 verified in solidity
-	assert.Equal(t, "f5894a8e9281b5687c0c7757d3d45fb76152bf659e6e61b1062f4c6bcb69c449", hex.EncodeToString(hash[:]))
+	// 0xd0c8a7a362a45a875d9eb78ef577d563d759e3a615a5f81f71bfc5e85f6bcf59 verified in solidity
+	assert.Equal(t, "d0c8a7a362a45a875d9eb78ef577d563d759e3a615a5f81f71bfc5e85f6bcf59", hex.EncodeToString(hash[:]))
 }
 
 func TestBlobKeyFromHeader(t *testing.T) {
 	data := codec.ConvertByPaddingEmptyByte(GETTYSBURG_ADDRESS_BYTES)
-	commitments, err := p.GetCommitments(data)
+	commitments, err := p.GetCommitmentsForPaddedLength(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,15 +46,16 @@ func TestBlobKeyFromHeader(t *testing.T) {
 		QuorumNumbers:   []core.QuorumID{0, 1},
 		PaymentMetadata: core.PaymentMetadata{
 			AccountID:         "0x123",
-			BinIndex:          5,
+			ReservationPeriod: 5,
 			CumulativePayment: big.NewInt(100),
+			Salt:              42,
 		},
 		Signature: []byte{1, 2, 3},
 	}
 	blobKey, err := bh.BlobKey()
 	assert.NoError(t, err)
-	// 0xb19d368345990c79744fe571fe99f427f35787b9383c55089fb5bd6a5c171bbc verified in solidity
-	assert.Equal(t, "b19d368345990c79744fe571fe99f427f35787b9383c55089fb5bd6a5c171bbc", blobKey.Hex())
+	// 0x22c9e31c3d79c7c4085b564113f488019cbae18198c9a4fc4ecd70a5742e8638 verified in solidity
+	assert.Equal(t, "22c9e31c3d79c7c4085b564113f488019cbae18198c9a4fc4ecd70a5742e8638", blobKey.Hex())
 }
 
 func TestBatchHeaderHash(t *testing.T) {
@@ -87,7 +89,7 @@ func TestBatchHeaderSerialization(t *testing.T) {
 
 func TestBlobCertHash(t *testing.T) {
 	data := codec.ConvertByPaddingEmptyByte(GETTYSBURG_ADDRESS_BYTES)
-	commitments, err := p.GetCommitments(data)
+	commitments, err := p.GetCommitmentsForPaddedLength(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,8 +101,9 @@ func TestBlobCertHash(t *testing.T) {
 			QuorumNumbers:   []core.QuorumID{0, 1},
 			PaymentMetadata: core.PaymentMetadata{
 				AccountID:         "0x123",
-				BinIndex:          5,
+				ReservationPeriod: 5,
 				CumulativePayment: big.NewInt(100),
+				Salt:              42,
 			},
 			Signature: []byte{1, 2, 3},
 		},
@@ -109,13 +112,13 @@ func TestBlobCertHash(t *testing.T) {
 
 	hash, err := blobCert.Hash()
 	assert.NoError(t, err)
-	// 0xc4512b8702f69cb837fff50a93d3d28aada535b1f151b64db45859c3f5bb096a verified in solidity
-	assert.Equal(t, "c4512b8702f69cb837fff50a93d3d28aada535b1f151b64db45859c3f5bb096a", hex.EncodeToString(hash[:]))
+	// 0x182087a394c8aab23e8da107c820679333c1efee66fd4380ba283c0e4c09efd6 verified in solidity
+	assert.Equal(t, "182087a394c8aab23e8da107c820679333c1efee66fd4380ba283c0e4c09efd6", hex.EncodeToString(hash[:]))
 }
 
 func TestBlobCertSerialization(t *testing.T) {
 	data := codec.ConvertByPaddingEmptyByte(GETTYSBURG_ADDRESS_BYTES)
-	commitments, err := p.GetCommitments(data)
+	commitments, err := p.GetCommitmentsForPaddedLength(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,8 +130,9 @@ func TestBlobCertSerialization(t *testing.T) {
 			QuorumNumbers:   []core.QuorumID{0, 1},
 			PaymentMetadata: core.PaymentMetadata{
 				AccountID:         "0x123",
-				BinIndex:          5,
+				ReservationPeriod: 5,
 				CumulativePayment: big.NewInt(100),
+				Salt:              42,
 			},
 			Signature: []byte{1, 2, 3},
 		},

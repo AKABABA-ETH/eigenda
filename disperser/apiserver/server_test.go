@@ -652,8 +652,10 @@ func setup() {
 		SRSOrder:        8192,
 		SRSNumberToLoad: 8192,
 		NumWorker:       uint64(runtime.GOMAXPROCS(0)),
+		LoadG2Points:    true,
 	}
-	prover, err = p.NewProver(config, true)
+
+	prover, err = p.NewProver(config, nil)
 	if err != nil {
 		teardown()
 		panic(fmt.Sprintf("failed to initialize KZG prover: %s", err.Error()))
@@ -746,7 +748,7 @@ func newTestServer(transactor core.Writer, testName string) *apiserver.Dispersal
 
 	mockState := &mock.MockOnchainPaymentState{}
 	mockState.On("RefreshOnchainPaymentState", tmock.Anything).Return(nil).Maybe()
-	if err := mockState.RefreshOnchainPaymentState(context.Background(), nil); err != nil {
+	if err := mockState.RefreshOnchainPaymentState(context.Background()); err != nil {
 		panic("failed to make initial query to the on-chain state")
 	}
 
@@ -756,15 +758,15 @@ func newTestServer(transactor core.Writer, testName string) *apiserver.Dispersal
 	mockState.On("GetRequiredQuorumNumbers").Return([]uint8{0, 1}, nil)
 	mockState.On("GetOnDemandQuorumNumbers").Return([]uint8{0, 1}, nil)
 	mockState.On("GetReservationWindow").Return(uint32(1), nil)
-	mockState.On("GetOnDemandPaymentByAccount", tmock.Anything, tmock.Anything).Return(core.OnDemandPayment{
+	mockState.On("GetOnDemandPaymentByAccount", tmock.Anything, tmock.Anything).Return(&core.OnDemandPayment{
 		CumulativePayment: big.NewInt(3000),
 	}, nil)
-	mockState.On("GetActiveReservationByAccount", tmock.Anything, tmock.Anything).Return(core.ActiveReservation{
-		SymbolsPerSec:  2048,
-		StartTimestamp: 0,
-		EndTimestamp:   math.MaxUint32,
-		QuorumNumbers:  []uint8{0, 1},
-		QuorumSplit:    []byte{50, 50},
+	mockState.On("GetReservedPaymentByAccount", tmock.Anything, tmock.Anything).Return(&core.ReservedPayment{
+		SymbolsPerSecond: 2048,
+		StartTimestamp:   0,
+		EndTimestamp:     math.MaxUint32,
+		QuorumNumbers:    []uint8{0, 1},
+		QuorumSplits:     []byte{50, 50},
 	}, nil)
 	// append test name to each table name for an unique store
 	table_names := []string{"reservations_server_" + testName, "ondemand_server_" + testName, "global_server_" + testName}
@@ -796,7 +798,7 @@ func newTestServer(transactor core.Writer, testName string) *apiserver.Dispersal
 		panic("failed to create offchain store")
 	}
 	mt := meterer.NewMeterer(meterer.Config{}, mockState, store, logger)
-	err = mt.ChainPaymentState.RefreshOnchainPaymentState(context.Background(), nil)
+	err = mt.ChainPaymentState.RefreshOnchainPaymentState(context.Background())
 	if err != nil {
 		panic("failed to make initial query to the on-chain state")
 	}

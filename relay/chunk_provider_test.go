@@ -8,6 +8,7 @@ import (
 	"github.com/Layr-Labs/eigenda/encoding"
 	"github.com/stretchr/testify/require"
 	"testing"
+	"time"
 )
 
 func TestFetchingIndividualBlobs(t *testing.T) {
@@ -44,7 +45,15 @@ func TestFetchingIndividualBlobs(t *testing.T) {
 		fragmentInfoMap[blobKey] = fragmentInfo
 	}
 
-	server, err := newChunkProvider(context.Background(), logger, chunkReader, 10, 32)
+	server, err := newChunkProvider(
+		context.Background(),
+		logger,
+		chunkReader,
+		1024*1024*32,
+		32,
+		10*time.Second,
+		10*time.Second,
+		nil)
 	require.NoError(t, err)
 
 	// Read it back.
@@ -124,7 +133,15 @@ func TestFetchingBatchedBlobs(t *testing.T) {
 		fragmentInfoMap[blobKey] = fragmentInfo
 	}
 
-	server, err := newChunkProvider(context.Background(), logger, chunkReader, 10, 32)
+	server, err := newChunkProvider(
+		context.Background(),
+		logger,
+		chunkReader,
+		1024*1024*32,
+		32,
+		10*time.Second,
+		10*time.Second,
+		nil)
 	require.NoError(t, err)
 
 	// Read it back.

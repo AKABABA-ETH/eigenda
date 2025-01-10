@@ -3,11 +3,13 @@ package grpc_test
 import (
 	"context"
 	"errors"
+	coreeth "github.com/Layr-Labs/eigenda/core/eth"
 	"os"
+	"sync/atomic"
 	"testing"
 
-	"github.com/Layr-Labs/eigenda/api/clients"
-	clientsmock "github.com/Layr-Labs/eigenda/api/clients/mock"
+	"github.com/Layr-Labs/eigenda/api/clients/v2"
+	clientsmock "github.com/Layr-Labs/eigenda/api/clients/v2/mock"
 	pbcommon "github.com/Layr-Labs/eigenda/api/grpc/common/v2"
 	pbv2 "github.com/Layr-Labs/eigenda/api/grpc/node/v2"
 	"github.com/Layr-Labs/eigenda/common"
@@ -27,6 +29,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+var (
+	blobParams = &core.BlobVersionParameters{
+		NumChunks:       8192,
+		CodingRate:      8,
+		MaxNumOperators: 3537,
+	}
+	blobParamsMap = map[v2.BlobVersion]*core.BlobVersionParameters{
+		0: blobParams,
+	}
 )
 
 type testComponents struct {
@@ -57,6 +70,8 @@ func newTestComponents(t *testing.T, config *node.Config) *testComponents {
 
 	s := nodemock.NewMockStoreV2()
 	relay := clientsmock.NewRelayClient()
+	var atomicRelayClient atomic.Value
+	atomicRelayClient.Store(relay)
 	node := &node.Node{
 		Config:      config,
 		Logger:      logger,
@@ -65,9 +80,23 @@ func newTestComponents(t *testing.T, config *node.Config) *testComponents {
 		StoreV2:     s,
 		ChainState:  chainState,
 		ValidatorV2: val,
-		RelayClient: relay,
+		RelayClient: atomicRelayClient,
 	}
-	server := grpc.NewServerV2(config, node, logger, ratelimiter)
+	node.BlobVersionParams.Store(v2.NewBlobVersionParameterMap(blobParamsMap))
+
+	// The eth client is only utilized for StoreChunks validation, which is disabled in these tests
+	var reader *coreeth.Reader
+
+	server, err := grpc.NewServerV2(
+		context.Background(),
+		config,
+		node,
+		logger,
+		ratelimiter,
+		prometheus.NewRegistry(),
+		reader)
+
+	require.NoError(t, err)
 	return &testComponents{
 		server:      server,
 		node:        node,
@@ -84,8 +113,21 @@ func TestV2NodeInfoRequest(t *testing.T) {
 	assert.True(t, err == nil)
 }
 
+func TestV2ServerWithoutV2(t *testing.T) {
+	config := makeConfig(t)
+	config.EnableV2 = false
+	c := newTestComponents(t, config)
+	_, err := c.server.StoreChunks(context.Background(), &pbv2.StoreChunksRequest{})
+	requireErrorStatus(t, err, codes.InvalidArgument)
+
+	_, err = c.server.GetChunks(context.Background(), &pbv2.GetChunksRequest{})
+	requireErrorStatus(t, err, codes.InvalidArgument)
+}
+
 func TestV2StoreChunksInputValidation(t *testing.T) {
-	c := newTestComponents(t, makeConfig(t))
+	config := makeConfig(t)
+	config.EnableV2 = true
+	c := newTestComponents(t, config)
 	_, batch, _ := nodemock.MockBatch(t)
 	batchProto, err := batch.ToProtobuf()
 	require.NoError(t, err)
@@ -94,10 +136,7 @@ func TestV2StoreChunksInputValidation(t *testing.T) {
 		Batch: &pbcommon.Batch{},
 	}
 	_, err = c.server.StoreChunks(context.Background(), req)
-	require.Error(t, err)
-	s, ok := status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.InvalidArgument)
+	requireErrorStatus(t, err, codes.InvalidArgument)
 
 	req = &pbv2.StoreChunksRequest{
 		Batch: &pbcommon.Batch{
@@ -106,10 +145,7 @@ func TestV2StoreChunksInputValidation(t *testing.T) {
 		},
 	}
 	_, err = c.server.StoreChunks(context.Background(), req)
-	require.Error(t, err)
-	s, ok = status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.InvalidArgument)
+	requireErrorStatus(t, err, codes.InvalidArgument)
 
 	req = &pbv2.StoreChunksRequest{
 		Batch: &pbcommon.Batch{
@@ -118,14 +154,13 @@ func TestV2StoreChunksInputValidation(t *testing.T) {
 		},
 	}
 	_, err = c.server.StoreChunks(context.Background(), req)
-	require.Error(t, err)
-	s, ok = status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.InvalidArgument)
+	requireErrorStatus(t, err, codes.InvalidArgument)
 }
 
 func TestV2StoreChunksSuccess(t *testing.T) {
-	c := newTestComponents(t, makeConfig(t))
+	config := makeConfig(t)
+	config.EnableV2 = true
+	c := newTestComponents(t, config)
 
 	blobKeys, batch, bundles := nodemock.MockBatch(t)
 	batchProto, err := batch.ToProtobuf()
@@ -176,7 +211,9 @@ func TestV2StoreChunksSuccess(t *testing.T) {
 }
 
 func TestV2StoreChunksDownloadFailure(t *testing.T) {
-	c := newTestComponents(t, makeConfig(t))
+	config := makeConfig(t)
+	config.EnableV2 = true
+	c := newTestComponents(t, config)
 
 	_, batch, _ := nodemock.MockBatch(t)
 	batchProto, err := batch.ToProtobuf()
@@ -191,14 +228,13 @@ func TestV2StoreChunksDownloadFailure(t *testing.T) {
 		Batch: batchProto,
 	})
 	require.Nil(t, reply.GetSignature())
-	require.Error(t, err)
-	s, ok := status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.Internal)
+	requireErrorStatus(t, err, codes.Internal)
 }
 
 func TestV2StoreChunksStorageFailure(t *testing.T) {
-	c := newTestComponents(t, makeConfig(t))
+	config := makeConfig(t)
+	config.EnableV2 = true
+	c := newTestComponents(t, config)
 
 	blobKeys, batch, bundles := nodemock.MockBatch(t)
 	batchProto, err := batch.ToProtobuf()
@@ -238,14 +274,13 @@ func TestV2StoreChunksStorageFailure(t *testing.T) {
 		Batch: batchProto,
 	})
 	require.Nil(t, reply.GetSignature())
-	require.Error(t, err)
-	s, ok := status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.Internal)
+	requireErrorStatus(t, err, codes.Internal)
 }
 
 func TestV2StoreChunksValidationFailure(t *testing.T) {
-	c := newTestComponents(t, makeConfig(t))
+	config := makeConfig(t)
+	config.EnableV2 = true
+	c := newTestComponents(t, config)
 
 	blobKeys, batch, bundles := nodemock.MockBatch(t)
 	batchProto, err := batch.ToProtobuf()
@@ -286,25 +321,21 @@ func TestV2StoreChunksValidationFailure(t *testing.T) {
 		Batch: batchProto,
 	})
 	require.Nil(t, reply.GetSignature())
-	require.Error(t, err)
-	s, ok := status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.Internal)
+	requireErrorStatus(t, err, codes.Internal)
 
 	c.store.AssertCalled(t, "DeleteKeys", mock.Anything, mock.Anything)
 }
 
 func TestV2GetChunksInputValidation(t *testing.T) {
-	c := newTestComponents(t, makeConfig(t))
+	config := makeConfig(t)
+	config.EnableV2 = true
+	c := newTestComponents(t, config)
 	ctx := context.Background()
 	req := &pbv2.GetChunksRequest{
 		BlobKey: []byte{0},
 	}
 	_, err := c.server.GetChunks(ctx, req)
-	require.Error(t, err)
-	s, ok := status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.InvalidArgument)
+	requireErrorStatus(t, err, codes.InvalidArgument)
 
 	bk := [32]byte{0}
 	maxUInt32 := uint32(0xFFFFFFFF)
@@ -313,10 +344,14 @@ func TestV2GetChunksInputValidation(t *testing.T) {
 		QuorumId: maxUInt32,
 	}
 	_, err = c.server.GetChunks(ctx, req)
+	requireErrorStatus(t, err, codes.InvalidArgument)
+}
+
+func requireErrorStatus(t *testing.T, err error, code codes.Code) {
 	require.Error(t, err)
-	s, ok = status.FromError(err)
+	s, ok := status.FromError(err)
 	require.True(t, ok)
-	assert.Equal(t, s.Code(), codes.InvalidArgument)
+	assert.Equal(t, s.Code(), code)
 }
 
 type mockKey struct{}

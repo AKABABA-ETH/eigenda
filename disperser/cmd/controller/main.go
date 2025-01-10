@@ -3,8 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/Layr-Labs/eigenda/api/clients/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/Layr-Labs/eigenda/common"
 	"github.com/Layr-Labs/eigenda/common/aws/dynamodb"
@@ -76,18 +82,35 @@ func RunController(ctx *cli.Context) error {
 		config.DynamoDBTableName,
 	)
 
+	metricsRegistry := prometheus.NewRegistry()
+	metricsRegistry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	metricsRegistry.MustRegister(collectors.NewGoCollector())
+
+	logger.Infof("Starting metrics server at port %d", config.MetricsPort)
+	addr := fmt.Sprintf(":%d", config.MetricsPort)
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(
+		metricsRegistry,
+		promhttp.HandlerOpts{},
+	))
+	metricsServer := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
 	encoderClient, err := encoder.NewEncoderClientV2(config.EncodingManagerConfig.EncoderAddress)
 	if err != nil {
 		return fmt.Errorf("failed to create encoder client: %v", err)
 	}
 	encodingPool := workerpool.New(config.NumConcurrentEncodingRequests)
 	encodingManager, err := controller.NewEncodingManager(
-		config.EncodingManagerConfig,
+		&config.EncodingManagerConfig,
 		blobMetadataStore,
 		encodingPool,
 		encoderClient,
 		chainReader,
 		logger,
+		metricsRegistry,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create encoding manager: %v", err)
@@ -126,18 +149,34 @@ func RunController(ctx *cli.Context) error {
 			return err
 		}
 	}
-	nodeClientManager, err := controller.NewNodeClientManager(config.NodeClientCacheSize, logger)
+
+	var requestSigner clients.DispersalRequestSigner
+	if config.DisperserStoreChunksSigningDisabled {
+		logger.Warn("StoreChunks() signing is disabled")
+	} else {
+		requestSigner, err = clients.NewDispersalRequestSigner(
+			context.Background(),
+			config.AwsClientConfig.Region,
+			config.AwsClientConfig.EndpointURL,
+			config.DisperserKMSKeyID)
+		if err != nil {
+			return fmt.Errorf("failed to create request signer: %v", err)
+		}
+	}
+
+	nodeClientManager, err := controller.NewNodeClientManager(config.NodeClientCacheSize, requestSigner, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create node client manager: %v", err)
 	}
 	dispatcher, err := controller.NewDispatcher(
-		config.DispatcherConfig,
+		&config.DispatcherConfig,
 		blobMetadataStore,
 		dispatcherPool,
 		ics,
 		sigAgg,
 		nodeClientManager,
 		logger,
+		metricsRegistry,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create dispatcher: %v", err)
@@ -153,6 +192,13 @@ func RunController(ctx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to start dispatcher: %v", err)
 	}
+
+	go func() {
+		err := metricsServer.ListenAndServe()
+		if err != nil && !strings.Contains(err.Error(), "http: Server closed") {
+			logger.Errorf("metrics metricsServer error: %v", err)
+		}
+	}()
 
 	return nil
 }

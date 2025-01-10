@@ -13,19 +13,10 @@ RUN apk add --no-cache make musl-dev linux-headers gcc git jq bash
 # Common build stage
 FROM base-builder AS common-builder
 WORKDIR /app
-COPY go.mod go.sum ./
-COPY disperser /app/disperser
-COPY common /app/common
-COPY core /app/core
-COPY api /app/api
-COPY contracts /app/contracts
-COPY indexer /app/indexer
-COPY encoding /app/encoding
-COPY relay /app/relay
+COPY . .
 
 # Churner build stage
 FROM common-builder AS churner-builder
-COPY operators ./operators
 WORKDIR /app/operators
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -47,7 +38,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # DataAPI build stage
 FROM common-builder AS dataapi-builder
-COPY operators ./operators
 WORKDIR /app/disperser
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -62,9 +52,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Retriever build stage
 FROM common-builder AS retriever-builder
-COPY retriever /app/retriever
-COPY node /app/node
-COPY operators ./operators
 WORKDIR /app/retriever
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -75,8 +62,6 @@ FROM common-builder AS node-builder
 ARG SEMVER
 ARG GITCOMMIT
 ARG GITDATE
-COPY node /app/node
-COPY operators ./operators
 WORKDIR /app/node
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -84,13 +69,25 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Nodeplugin build stage
 FROM common-builder AS node-plugin-builder
-COPY ./node /app/node
-COPY operators ./operators
 WORKDIR /app/node
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -o ./bin/nodeplugin ./plugin/cmd
 
+# Controller build stage
+FROM common-builder AS controller-builder
+COPY node/auth /app/node/auth
+WORKDIR /app/disperser
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -o ./bin/controller ./cmd/controller
+
+# Relay build stage
+FROM common-builder AS relay-builder
+WORKDIR /app/relay
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -o ./bin/relay ./cmd
 
 # Final stages for each component
 FROM alpine:3.18 AS churner
@@ -124,3 +121,11 @@ ENTRYPOINT ["node"]
 FROM alpine:3.18 AS nodeplugin
 COPY --from=node-plugin-builder /app/node/bin/nodeplugin /usr/local/bin
 ENTRYPOINT ["nodeplugin"]
+
+FROM alpine:3.18 AS controller
+COPY --from=controller-builder /app/disperser/bin/controller /usr/local/bin
+ENTRYPOINT ["controller"]
+
+FROM alpine:3.18 AS relay
+COPY --from=relay-builder /app/relay/bin/relay /usr/local/bin
+ENTRYPOINT ["relay"]

@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/Layr-Labs/eigenda/common/pubip"
 	"github.com/Layr-Labs/eigenda/encoding/kzg"
 	"github.com/Layr-Labs/eigenda/encoding/kzg/prover"
@@ -29,6 +31,7 @@ import (
 	clientsmock "github.com/Layr-Labs/eigenda/api/clients/mock"
 	commonaws "github.com/Layr-Labs/eigenda/common/aws"
 	"github.com/Layr-Labs/eigenda/core/meterer"
+	coremock "github.com/Layr-Labs/eigenda/core/mock"
 	"github.com/Layr-Labs/eigenda/disperser/apiserver"
 	dispatcher "github.com/Layr-Labs/eigenda/disperser/batcher/grpc"
 	"github.com/Layr-Labs/eigenda/disperser/encoder"
@@ -43,7 +46,6 @@ import (
 	"github.com/Layr-Labs/eigenda/common"
 	commonmock "github.com/Layr-Labs/eigenda/common/mock"
 	"github.com/Layr-Labs/eigenda/core"
-	coremock "github.com/Layr-Labs/eigenda/core/mock"
 	"github.com/Layr-Labs/eigenda/disperser"
 	"github.com/Layr-Labs/eigenda/disperser/batcher"
 	batchermock "github.com/Layr-Labs/eigenda/disperser/batcher/mock"
@@ -98,7 +100,6 @@ func init() {
 
 // makeTestEncoder makes an encoder currently using the only supported backend.
 func mustMakeTestComponents() (encoding.Prover, encoding.Verifier) {
-
 	config := &kzg.KzgConfig{
 		G1Path:          "../inabox/resources/kzg/g1.point",
 		G2Path:          "../inabox/resources/kzg/g2.point",
@@ -106,14 +107,15 @@ func mustMakeTestComponents() (encoding.Prover, encoding.Verifier) {
 		SRSOrder:        3000,
 		SRSNumberToLoad: 3000,
 		NumWorker:       uint64(runtime.GOMAXPROCS(0)),
+		LoadG2Points:    true,
 	}
 
-	p, err := prover.NewProver(config, true)
+	p, err := prover.NewProver(config, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	v, err := verifier.NewVerifier(config, true)
+	v, err := verifier.NewVerifier(config, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -173,12 +175,12 @@ func mustMakeDisperser(t *testing.T, cst core.IndexedChainState, store disperser
 	}
 
 	p0, _ := mustMakeTestComponents()
-	metrics := encoder.NewMetrics("9000", logger)
+	metrics := encoder.NewMetrics(prometheus.NewRegistry(), "9000", logger)
 	grpcEncoder := encoder.NewEncoderServer(encoder.ServerConfig{
 		GrpcPort:              encoderPort,
 		MaxConcurrentRequests: 16,
 		RequestPoolSize:       32,
-	}, logger, p0, metrics)
+	}, logger, p0, metrics, grpcprom.NewServerMetrics())
 
 	encoderClient, err := encoder.NewEncoderClient(batcherConfig.EncoderSocket, 10*time.Second)
 	if err != nil {
@@ -216,20 +218,20 @@ func mustMakeDisperser(t *testing.T, cst core.IndexedChainState, store disperser
 	if err != nil {
 		panic("failed to convert hex to ECDSA")
 	}
-	publicKey := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
+	publicKey := crypto.PubkeyToAddress(privateKey.PublicKey)
 
 	mockState := &coremock.MockOnchainPaymentState{}
 	reservationLimit := uint64(1024)
 	paymentLimit := big.NewInt(512)
-	mockState.On("GetActiveReservationByAccount", mock.Anything, mock.MatchedBy(func(account string) bool {
+	mockState.On("GetReservedPaymentByAccount", mock.Anything, mock.MatchedBy(func(account gethcommon.Address) bool {
 		return account == publicKey
-	})).Return(core.ActiveReservation{SymbolsPerSec: reservationLimit, StartTimestamp: 0, EndTimestamp: math.MaxUint32, QuorumSplit: []byte{50, 50}, QuorumNumbers: []uint8{0, 1}}, nil)
-	mockState.On("GetActiveReservationByAccount", mock.Anything, mock.Anything).Return(core.ActiveReservation{}, errors.New("reservation not found"))
+	})).Return(&core.ReservedPayment{SymbolsPerSecond: reservationLimit, StartTimestamp: 0, EndTimestamp: math.MaxUint32, QuorumSplits: []byte{50, 50}, QuorumNumbers: []uint8{0, 1}}, nil)
+	mockState.On("GetReservedPaymentByAccount", mock.Anything, mock.Anything).Return(&core.ReservedPayment{}, errors.New("reservation not found"))
 
-	mockState.On("GetOnDemandPaymentByAccount", mock.Anything, mock.MatchedBy(func(account string) bool {
+	mockState.On("GetOnDemandPaymentByAccount", mock.Anything, mock.MatchedBy(func(account gethcommon.Address) bool {
 		return account == publicKey
-	})).Return(core.OnDemandPayment{CumulativePayment: paymentLimit}, nil)
-	mockState.On("GetOnDemandPaymentByAccount", mock.Anything, mock.Anything).Return(core.OnDemandPayment{}, errors.New("payment not found"))
+	})).Return(&core.OnDemandPayment{CumulativePayment: paymentLimit}, nil)
+	mockState.On("GetOnDemandPaymentByAccount", mock.Anything, mock.Anything).Return(&core.OnDemandPayment{}, errors.New("payment not found"))
 	mockState.On("GetOnDemandQuorumNumbers", mock.Anything).Return([]uint8{0, 1}, nil)
 	mockState.On("GetGlobalSymbolsPerSecond", mock.Anything).Return(uint64(1024), nil)
 	mockState.On("GetPricePerSymbol", mock.Anything).Return(uint32(1), nil)
@@ -288,7 +290,7 @@ func mustMakeDisperser(t *testing.T, cst core.IndexedChainState, store disperser
 	}
 
 	mockState.On("RefreshOnchainPaymentState", mock.Anything).Return(nil).Maybe()
-	if err := mockState.RefreshOnchainPaymentState(context.Background(), nil); err != nil {
+	if err := mockState.RefreshOnchainPaymentState(context.Background()); err != nil {
 		panic("failed to make initial query to the on-chain state")
 	}
 
@@ -349,19 +351,21 @@ func mustMakeOperators(t *testing.T, cst *coremock.ChainDataMock, logger logging
 		}
 
 		config := &node.Config{
-			Hostname:                  op.Host,
-			DispersalPort:             op.DispersalPort,
-			RetrievalPort:             op.RetrievalPort,
-			InternalRetrievalPort:     op.RetrievalPort,
-			InternalDispersalPort:     op.DispersalPort,
-			EnableMetrics:             false,
-			Timeout:                   10,
-			ExpirationPollIntervalSec: 10,
-			DbPath:                    dbPath,
-			LogPath:                   logPath,
-			PrivateBls:                string(op.KeyPair.GetPubKeyG1().Serialize()),
-			ID:                        id,
-			QuorumIDList:              registeredQuorums,
+			Hostname:                            op.Host,
+			DispersalPort:                       op.DispersalPort,
+			RetrievalPort:                       op.RetrievalPort,
+			InternalRetrievalPort:               op.RetrievalPort,
+			InternalDispersalPort:               op.DispersalPort,
+			EnableMetrics:                       false,
+			Timeout:                             10,
+			ExpirationPollIntervalSec:           10,
+			DbPath:                              dbPath,
+			LogPath:                             logPath,
+			PrivateBls:                          string(op.KeyPair.GetPubKeyG1().Serialize()),
+			ID:                                  id,
+			QuorumIDList:                        registeredQuorums,
+			DispersalAuthenticationKeyCacheSize: 1024,
+			DisableDispersalAuthentication:      false,
 		}
 
 		// creating a new instance of encoder instead of sharing enc because enc is not thread safe
@@ -376,6 +380,8 @@ func mustMakeOperators(t *testing.T, cst *coremock.ChainDataMock, logger logging
 		tx.On("GetBlockStaleMeasure").Return(nil)
 		tx.On("GetStoreDurationBlocks").Return(nil)
 		tx.On("OperatorIDToAddress").Return(gethcommon.Address{1}, nil)
+		socket := core.MakeOperatorSocket(config.Hostname, config.DispersalPort, config.RetrievalPort)
+		tx.On("GetOperatorSocket", mock.Anything, mock.Anything).Return(socket.String(), nil)
 
 		noopMetrics := metrics.NewNoopMetrics()
 		reg := prometheus.NewRegistry()
@@ -413,10 +419,24 @@ func mustMakeOperators(t *testing.T, cst *coremock.ChainDataMock, logger logging
 			OperatorSocketsFilterer: mockOperatorSocketsFilterer,
 		}
 
-		ratelimiter := &commonmock.NoopRatelimiter{}
+		rateLimiter := &commonmock.NoopRatelimiter{}
 
-		serverV1 := nodegrpc.NewServer(config, n, logger, ratelimiter)
-		serverV2 := nodegrpc.NewServerV2(config, n, logger, ratelimiter)
+		// TODO(cody-littley): Once we switch this test to use the v2 disperser, we will need to properly set up
+		//  the disperser's public/private keys for signing StoreChunks() requests
+		disperserAddress := gethcommon.Address{}
+		reader := &coremock.MockWriter{}
+		reader.On("GetDisperserAddress", uint32(0)).Return(disperserAddress, nil)
+
+		serverV1 := nodegrpc.NewServer(config, n, logger, rateLimiter)
+		serverV2, err := nodegrpc.NewServerV2(
+			context.Background(),
+			config,
+			n,
+			logger,
+			rateLimiter,
+			prometheus.NewRegistry(),
+			reader)
+		require.NoError(t, err)
 
 		ops[id] = TestOperator{
 			Node:     n,

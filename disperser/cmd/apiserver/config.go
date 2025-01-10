@@ -35,8 +35,7 @@ type Config struct {
 	EncodingConfig              kzg.KzgConfig
 	EnableRatelimiter           bool
 	EnablePaymentMeterer        bool
-	UpdateInterval              int
-	ChainReadTimeout            int
+	ChainReadTimeout            time.Duration
 	ReservationsTableName       string
 	OnDemandTableName           string
 	GlobalRateTableName         string
@@ -95,8 +94,10 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		DisperserVersion: DisperserVersion(version),
 		AwsClientConfig:  aws.ReadClientConfig(ctx, flags.FlagPrefix),
 		ServerConfig: disperser.ServerConfig{
-			GrpcPort:    ctx.GlobalString(flags.GrpcPortFlag.Name),
-			GrpcTimeout: ctx.GlobalDuration(flags.GrpcTimeoutFlag.Name),
+			GrpcPort:      ctx.GlobalString(flags.GrpcPortFlag.Name),
+			GrpcTimeout:   ctx.GlobalDuration(flags.GrpcTimeoutFlag.Name),
+			PprofHttpPort: ctx.GlobalString(flags.PprofHttpPort.Name),
+			EnablePprof:   ctx.GlobalBool(flags.EnablePprof.Name),
 		},
 		BlobstoreConfig: blobstore.Config{
 			BucketName: ctx.GlobalString(flags.S3BucketNameFlag.Name),
@@ -117,8 +118,7 @@ func NewConfig(ctx *cli.Context) (Config, error) {
 		GlobalRateTableName:         ctx.GlobalString(flags.GlobalRateTableName.Name),
 		BucketTableName:             ctx.GlobalString(flags.BucketTableName.Name),
 		BucketStoreSize:             ctx.GlobalInt(flags.BucketStoreSize.Name),
-		UpdateInterval:              ctx.GlobalInt(flags.UpdateInterval.Name),
-		ChainReadTimeout:            ctx.GlobalInt(flags.ChainReadTimeout.Name),
+		ChainReadTimeout:            ctx.GlobalDuration(flags.ChainReadTimeout.Name),
 		EthClientConfig:             geth.ReadEthClientConfigRPCOnly(ctx),
 		MaxBlobSize:                 ctx.GlobalInt(flags.MaxBlobSize.Name),
 		MaxNumSymbolsPerBlob:        ctx.GlobalUint(flags.MaxNumSymbolsPerBlob.Name),
